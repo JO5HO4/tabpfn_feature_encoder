@@ -6,6 +6,7 @@ from tabpfn_feature_encoder.models.encoders import (
     FeatureMixerEncoder,
     LightweightGNNEncoder,
     MLPEncoder,
+    ParticleTransformerEncoder,
     build_encoder,
 )
 
@@ -105,6 +106,48 @@ def test_lightweight_gnn_encoder_outputs_event_embeddings() -> None:
 
     assert encoder.encoder_type == "gnn"
     assert out.shape == (2, 5)
+
+
+def test_particle_transformer_encoder_outputs_event_embeddings() -> None:
+    graphs = EventGraphDataset(
+        nodes=[
+            torch.randn(3, 4).numpy(),
+            torch.randn(1, 4).numpy(),
+        ],
+        global_features=torch.randn(2, 2).numpy(),
+        node_feature_names=["a", "b", "c", "d"],
+        global_feature_names=["g0", "g1"],
+    )
+    batch = graphs.to_batch(torch.tensor([0, 1]).numpy(), device="cpu")
+    encoder = ParticleTransformerEncoder(
+        node_dim=4,
+        global_dim=2,
+        hidden_dim=8,
+        output_dim=5,
+        layers=2,
+        attention_heads=2,
+    )
+
+    out = encoder(batch)
+
+    assert encoder.encoder_type == "transformer"
+    assert encoder.attention_heads == 2
+    assert out.shape == (2, 5)
+
+
+def test_build_encoder_selects_particle_transformer() -> None:
+    encoder = build_encoder(
+        encoder_type="transformer",
+        input_dim=4,
+        global_dim=2,
+        hidden_dim=8,
+        output_dim=5,
+        layers=2,
+        residual_scale=0.1,
+        attention_heads=2,
+    )
+
+    assert isinstance(encoder, ParticleTransformerEncoder)
 
 
 def test_lightweight_gnn_encoder_appends_direct_summary_features() -> None:

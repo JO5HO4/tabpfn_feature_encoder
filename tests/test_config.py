@@ -31,6 +31,7 @@ def test_project_config_from_dict() -> None:
                 "type": "residual_mlp",
                 "layers": 4,
                 "hidden_dim": 32,
+                "attention_heads": 2,
                 "output_dim": 16,
                 "epochs": 3,
                 "learning_rate": 0.01,
@@ -76,6 +77,7 @@ def test_project_config_from_dict() -> None:
     assert cfg.encoder.type == "residual_mlp"
     assert cfg.encoder.layers == 4
     assert cfg.encoder.hidden_dim == 32
+    assert cfg.encoder.attention_heads == 2
     assert cfg.encoder.output_dim == 16
     assert cfg.encoder.epochs == 3
     assert cfg.encoder.learning_rate == 0.01
@@ -103,6 +105,7 @@ def test_encoder_defaults_match_main_training_config() -> None:
     assert cfg.encoder.type == "gnn"
     assert cfg.encoder.layers == 3
     assert cfg.encoder.hidden_dim == 128
+    assert cfg.encoder.attention_heads == 4
     assert cfg.encoder.output_dim == 128
     assert cfg.encoder.learning_rate == 5e-5
     assert cfg.encoder.batch_size == 2048

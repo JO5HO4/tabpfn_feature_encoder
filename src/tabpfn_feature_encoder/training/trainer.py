@@ -83,10 +83,18 @@ class EncoderTabPFNClassifier:
 
         y_np = to_label_vector(y_train)
         is_graph_input = isinstance(X_train, EventGraphDataset)
-        if self.encoder.type.lower() in {"gnn", "graph", "graph_gnn"} and not is_graph_input:
-            raise TypeError("encoder.type `gnn` requires an EventGraphDataset input.")
-        if is_graph_input and self.encoder.type.lower() not in {"gnn", "graph", "graph_gnn"}:
-            raise TypeError("EventGraphDataset input requires encoder.type `gnn`.")
+        graph_encoder_types = {
+            "gnn",
+            "graph",
+            "graph_gnn",
+            "transformer",
+            "particle_transformer",
+            "graph_transformer",
+        }
+        if self.encoder.type.lower() in graph_encoder_types and not is_graph_input:
+            raise TypeError("graph encoder types require an EventGraphDataset input.")
+        if is_graph_input and self.encoder.type.lower() not in graph_encoder_types:
+            raise TypeError("EventGraphDataset input requires a graph encoder type.")
 
         if len(X_train) != len(y_np):
             raise ValueError("X_train and y_train length mismatch.")
@@ -131,6 +139,7 @@ class EncoderTabPFNClassifier:
             output_dim=self.encoder.output_dim,
             layers=self.encoder.layers,
             residual_scale=self.encoder.residual_scale,
+            attention_heads=self.encoder.attention_heads,
         ).to(device)
         self.tabpfn_adapter_ = TabPFNPromptAdapter(device=device).build()
 
@@ -165,9 +174,11 @@ class EncoderTabPFNClassifier:
             f"grad_clip_norm={self.encoder.grad_clip_norm}",
             f"early_stopping_patience={self.encoder.early_stopping_patience}",
         ]
-        if self.encoder_model_.encoder_type in {"residual_mlp", "gnn"}:
+        if self.encoder_model_.encoder_type in {"residual_mlp", "gnn", "transformer"}:
             settings.insert(2, f"layers={self.encoder.layers}")
             settings.insert(3, f"hidden_dim={self.encoder.hidden_dim}")
+        if self.encoder_model_.encoder_type == "transformer":
+            settings.insert(4, f"attention_heads={self.encoder.attention_heads}")
         if getattr(self.encoder_model_, "summary_dim", 0):
             settings.append(f"summary_dim={self.encoder_model_.summary_dim}")
             settings.append(f"learned_dim={self.encoder_model_.learned_dim}")

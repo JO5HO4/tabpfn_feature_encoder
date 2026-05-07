@@ -9,7 +9,7 @@ a frozen TabPFN classifier.
 ## Current Design
 
 1. Read every row from each configured ROOT file.
-2. Build flat tabular features for the MLP-style encoders, or variable-particle event graphs for the GNN encoder.
+2. Build flat tabular features for the MLP-style encoders, or variable-particle event graphs for the GNN/transformer encoders.
 3. Split the full dataset into train/validation/test with a 50/25/25 stratified split.
 4. Standardize features using train-set statistics only.
 5. Train on batches from the train split. Each batch is split 50/50 into support and query.
@@ -30,6 +30,18 @@ particles + scalars -> GNN + event summaries -> 128D event vector -> TabPFN
 
 The GNN ignores particle `max` values and uses all particles present in each
 event. The `max` entries in the config are only for the flat fallback features.
+
+The repo also includes a particle transformer encoder. It uses the same graph
+inputs and fixed event summaries as the GNN, but replaces message passing with
+self-attention over all particles in an event:
+
+```text
+particles + scalars -> particle transformer + event summaries -> 128D event vector -> TabPFN
+```
+
+Run it with [configs/cp_transformer.yaml](configs/cp_transformer.yaml), or set
+`encoder.type: transformer` in another config. `hidden_dim` must be divisible by
+`attention_heads`.
 
 The code also supports flat encoders. Set `encoder.type` to `feature_mixer` for
 a stable residual linear feature mixer:
@@ -176,6 +188,14 @@ representation with fixed graph summary features, including global features,
 event particle count, per-type particle counts, pooled particle statistics, and
 per-particle-type pooled statistics. This is meant to preserve production-mode
 information when the encoder is frozen for GamGam transfer.
+With `type: transformer`, the same `output_dim` and event-summary behavior apply,
+but the learned representation comes from particle self-attention instead of GNN
+message passing. Start from:
+
+```bash
+bash scripts/run_cp_encoder.sh configs/cp_transformer.yaml
+```
+
 With `type: feature_mixer` or `type: feature_gate`, `output_dim` must match the
 number of flat input features, currently 72.
 
@@ -324,6 +344,8 @@ Earlier CP-only GNN checkpoints reached validation AUC around `0.66`, but their
 frozen embeddings underperformed flat TabPFN on GamGam transfer. The current
 default GNN is therefore summary-preserving and writes to a new output directory;
 retrain it before rerunning transfer.
+
+For transformer runs, the settings line also prints `attention_heads`.
 
 ## Outputs
 

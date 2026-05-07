@@ -12,6 +12,7 @@ class EncoderConfig:
     type: str = "gnn"
     layers: int = 3
     hidden_dim: int = 128
+    attention_heads: int = 4
     output_dim: int = 128
     epochs: int = 20
     learning_rate: float = 5e-5
@@ -32,8 +33,11 @@ class EncoderConfig:
         grad_clip_norm = float(payload.get("grad_clip_norm", 0.1))
         early_stopping_patience = int(payload.get("early_stopping_patience", 8))
         min_delta = float(payload.get("min_delta", 0.001))
+        attention_heads = int(payload.get("attention_heads", payload.get("heads", 4)))
         if not 0.0 < support_query_ratio < 1.0:
             raise ValueError("encoder.support_query_ratio must be between 0 and 1.")
+        if attention_heads <= 0:
+            raise ValueError("encoder.attention_heads must be positive.")
         if residual_scale < 0.0:
             raise ValueError("encoder.residual_scale must be non-negative.")
         if identity_weight < 0.0:
@@ -48,6 +52,7 @@ class EncoderConfig:
             type=encoder_type,
             layers=int(payload.get("layers", 3)),
             hidden_dim=int(payload.get("hidden_dim", 128)),
+            attention_heads=attention_heads,
             output_dim=int(payload.get("output_dim", 128)),
             epochs=int(payload.get("epochs", 20)),
             learning_rate=float(payload.get("learning_rate", 5e-5)),

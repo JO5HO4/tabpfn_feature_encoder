@@ -8,10 +8,11 @@ description: Use when running, configuring, validating, or documenting the tabpf
 ## Repo Basics
 
 - Repo root: `tabpfn-feature-encoder`.
-- Main config: `configs/cp_encoder.yaml`.
+- Main CP GNN config: `configs/cp_encoder.yaml`.
+- Particle transformer config: `configs/cp_transformer.yaml`.
 - Launcher: `bash scripts/run_cp_encoder.sh`.
 - Package CLI: `tabpfn-encoder-train train --config configs/cp_encoder.yaml`.
-- Output dir is configured by `output_dir`; current default writes to `/global/cfs/projectdirs/atlas/joshua/tabpfn/runs/cp_encoder_tabpfn`.
+- Output dir is configured by `output_dir`.
 
 ## Environment
 
@@ -32,6 +33,7 @@ The runner falls back to `conda run --no-capture-output -n tabpfn` if the consol
 - Sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` unless already set.
 - Reuses an existing checkpoint from `~/.cache/tabpfn` when available.
 - Accepts an optional config path: `bash scripts/run_cp_encoder.sh configs/other.yaml`.
+- Runs the transformer with: `bash scripts/run_cp_encoder.sh configs/cp_transformer.yaml`.
 
 ## Validation Commands
 
@@ -60,4 +62,3 @@ Training saves:
 - `run_metadata.json`
 
 Terminal metrics print to three decimals; CSV/JSON keep full precision.
-
