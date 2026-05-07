@@ -36,6 +36,10 @@ The runner falls back to `conda run --no-capture-output -n tabpfn` if the consol
 
 - Runs `configs/source_residual_mlp.yaml`, `configs/source_gnn.yaml`, and `configs/source_transformer.yaml` by default.
 - For each config, trains the 12-class source encoder and then runs CP even/odd and open-data transfer evaluations.
+- Runs configs in parallel by default when multiple GPUs are visible, with one config per GPU.
+- Writes parallel logs to `runs/workflow_logs/<timestamp>/`.
+- Select GPUs with `TABPFN_WORKFLOW_GPUS=0,1,2,3 bash scripts/run_full_workflow.sh`.
+- Force sequential execution with `TABPFN_WORKFLOW_PARALLEL=0 bash scripts/run_full_workflow.sh`.
 - Accepts optional config paths to restrict the workflow: `bash scripts/run_full_workflow.sh configs/source_residual_mlp.yaml`.
 
 `scripts/run_source_encoder.sh`:

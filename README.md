@@ -257,9 +257,25 @@ Full workflow for the nominal benchmark:
 bash scripts/run_full_workflow.sh
 ```
 
-This runs the residual MLP, GNN, and transformer configs in sequence. For each
-config, the launcher trains on the 12-class source task, then runs the held-out
-CP even/odd transfer and ATLAS open-data GamGam transfer evaluations.
+This runs the residual MLP, GNN, and transformer configs. For each config, the
+launcher trains on the 12-class source task, then runs the held-out CP even/odd
+transfer and ATLAS open-data GamGam transfer evaluations.
+
+On a multi-GPU node, the full workflow runs configs in parallel by default, one
+config per visible GPU. Logs are written under `runs/workflow_logs/<timestamp>/`.
+For a 4-GPU node, the default three encoder configs all start together.
+
+To choose GPUs explicitly:
+
+```bash
+TABPFN_WORKFLOW_GPUS=0,1,2,3 bash scripts/run_full_workflow.sh
+```
+
+To force sequential execution:
+
+```bash
+TABPFN_WORKFLOW_PARALLEL=0 bash scripts/run_full_workflow.sh
+```
 
 To run only selected encoder configs:
 

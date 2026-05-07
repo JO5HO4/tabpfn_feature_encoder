@@ -11,7 +11,8 @@ Every default run trains the encoder on the 12-class source task without TabPFN,
 then freezes it for downstream TabPFN tests.
 
 Use `bash scripts/run_full_workflow.sh` to produce the nominal residual MLP, GNN,
-and transformer comparison runs. Pass config paths to restrict the workflow.
+and transformer comparison runs. On multi-GPU nodes this runs configs in
+parallel, one config per visible GPU. Pass config paths to restrict the workflow.
 
 Source metrics:
 
