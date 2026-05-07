@@ -23,7 +23,7 @@ if [[ -z "${TABPFN_MODEL_PATH:-}" ]]; then
     done
 fi
 
-args=(transfer --config "${CONFIG_PATH}")
+args=(transfer-cp --config "${CONFIG_PATH}")
 if [[ -n "${MODEL_PATH}" ]]; then
     args+=(--model "${MODEL_PATH}")
 fi

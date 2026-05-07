@@ -1,14 +1,12 @@
 import torch
 
 from tabpfn_feature_encoder.data.graphs import EventGraphDataset
-from tabpfn_feature_encoder.models.encoders import (
-    FeatureGateEncoder,
-    FeatureMixerEncoder,
-    LightweightGNNEncoder,
-    MLPEncoder,
-    ParticleTransformerEncoder,
-    build_encoder,
-)
+from tabpfn_feature_encoder.models.factory import build_encoder
+from tabpfn_feature_encoder.models.feature_gate import FeatureGateEncoder
+from tabpfn_feature_encoder.models.feature_mixer import FeatureMixerEncoder
+from tabpfn_feature_encoder.models.gnn import LightweightGNNEncoder
+from tabpfn_feature_encoder.models.mlp import MLPEncoder
+from tabpfn_feature_encoder.models.transformer import ParticleTransformerEncoder
 
 
 def test_mlp_encoder_starts_as_identity_when_dims_match() -> None:

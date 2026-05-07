@@ -10,7 +10,8 @@ from tabpfn_feature_encoder.data.base import to_label_vector, to_numpy_matrix
 from tabpfn_feature_encoder.data.graphs import EventGraphDataset, GraphStandardizer
 from tabpfn_feature_encoder.data.preprocessing import Standardizer
 from tabpfn_feature_encoder.evaluation.metrics import accuracy, log_loss, roc_auc
-from tabpfn_feature_encoder.models.encoders import build_encoder, require_torch
+from tabpfn_feature_encoder.models.factory import build_encoder
+from tabpfn_feature_encoder.models.torch_utils import require_torch
 
 
 @dataclass

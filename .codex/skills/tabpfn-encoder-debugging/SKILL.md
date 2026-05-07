@@ -66,7 +66,7 @@ The runner prefers existing checkpoints in `~/.cache/tabpfn`, especially v2.5. T
 
 ```bash
 export TABPFN_MODEL_PATH=/path/to/model.ckpt
-bash scripts/run_cp_encoder.sh
+bash scripts/run_source_encoder.sh
 ```
 
 If TabPFN attempts an interactive license flow, the checkpoint path is not being used.

@@ -114,7 +114,7 @@ def test_encoder_defaults_match_main_training_config() -> None:
 
 
 def test_main_config_uses_12_class_source_task_and_holds_out_cp_files() -> None:
-    cfg = load_project_config(Path("configs/cp_encoder.yaml"))
+    cfg = load_project_config(Path("configs/source_residual_mlp.yaml"))
     configured_files = {
         filename
         for label_config in cfg.dataset.labels
@@ -125,3 +125,19 @@ def test_main_config_uses_12_class_source_task_and_holds_out_cp_files() -> None:
     assert "ttH_NLO.root" not in configured_files
     assert "ttH_CPodd.root" not in configured_files
     assert cfg.encoder.type == "residual_mlp"
+
+
+def test_source_encoder_configs_have_clear_output_names() -> None:
+    expected = {
+        "source_residual_mlp.yaml": ("residual_mlp", "source_residual_mlp"),
+        "source_gnn.yaml": ("gnn", "source_gnn"),
+        "source_transformer.yaml": ("transformer", "source_transformer"),
+    }
+
+    for filename, (encoder_type, run_name) in expected.items():
+        cfg = load_project_config(Path("configs") / filename)
+
+        assert cfg.encoder.type == encoder_type
+        assert cfg.output_dir.name == run_name
+        assert cfg.transfer.output_dir == cfg.output_dir / "open_data_generalization"
+        assert len(cfg.dataset.labels) == 12

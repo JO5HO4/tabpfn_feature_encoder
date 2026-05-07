@@ -38,6 +38,16 @@ def build_parser() -> argparse.ArgumentParser:
             "then output_dir/encoder_classifier.pkl."
         ),
     )
+    cp_transfer = subparsers.add_parser(
+        "transfer-cp",
+        help="Evaluate a frozen source-trained encoder on held-out CP even vs odd.",
+    )
+    cp_transfer.add_argument("--config", required=True, help="Path to YAML config.")
+    cp_transfer.add_argument(
+        "--model",
+        default=None,
+        help="Path to saved encoder checkpoint. Defaults to output_dir/encoder_classifier.pkl.",
+    )
     return parser
 
 
@@ -48,6 +58,11 @@ def main(argv: list[str] | None = None) -> None:
         run_train(Path(args.config))
     elif args.command == "transfer":
         run_transfer(Path(args.config), model_path=None if args.model is None else Path(args.model))
+    elif args.command == "transfer-cp":
+        run_cp_transfer(
+            Path(args.config),
+            model_path=None if args.model is None else Path(args.model),
+        )
     else:
         parser.error(f"Unknown command: {args.command}")
 
@@ -66,7 +81,7 @@ def run_train(config_path: Path) -> None:
         "particle_transformer",
         "graph_transformer",
     }
-    cache_dir = _cache_subdir(cfg.cache_dir, "cp_encoder")
+    cache_dir = _cache_subdir(cfg.cache_dir, "source_multiclass")
     dataset = build_default_cp_dataset(
         random_state=cfg.seed,
         dataset_config=cfg.dataset,
@@ -185,16 +200,14 @@ def run_train(config_path: Path) -> None:
 def run_transfer(config_path: Path, model_path: Path | None = None) -> None:
     cfg = load_project_config(config_path)
     set_global_seed(cfg.seed)
-    output_dir = cfg.transfer.output_dir or cfg.output_dir / "gamgam_transfer"
+    output_dir = cfg.transfer.output_dir or cfg.output_dir / "open_data_generalization"
     cache_dir = cfg.transfer.cache_dir or _cache_subdir(cfg.cache_dir, "gamgam_production_modes")
-    resolved_model_path = (
-        model_path
-        or cfg.transfer.encoder_model
-        or _default_encoder_checkpoint(cfg.output_dir)
+    resolved_model_path, trained = _load_encoder_checkpoint(
+        cfg=cfg,
+        model_path=model_path,
+        allow_transfer_config=True,
+        command_name="transfer",
     )
-    trained = load_pickle(resolved_model_path)
-    if not isinstance(trained, EncoderOnlyClassifier):
-        raise TypeError("transfer --model must point to a saved EncoderOnlyClassifier.")
     dataset = build_gamgam_dataset(
         random_state=cfg.seed,
         transfer_config=cfg.transfer,
@@ -223,10 +236,48 @@ def run_transfer(config_path: Path, model_path: Path | None = None) -> None:
     print(f"saved transfer metrics: {output_dir / 'open_data_generalization_metrics.json'}")
 
 
+def run_cp_transfer(config_path: Path, model_path: Path | None = None) -> dict[str, Any]:
+    cfg = load_project_config(config_path)
+    set_global_seed(cfg.seed)
+    resolved_model_path, trained = _load_encoder_checkpoint(
+        cfg=cfg,
+        model_path=model_path,
+        allow_transfer_config=False,
+        command_name="transfer-cp",
+    )
+    print(f"Using frozen encoder: {resolved_model_path}")
+    metrics = _run_cp_generalization(
+        cfg=cfg,
+        model=trained,
+        use_graph_encoder=trained.is_graph_input_,
+    )
+    output_dir = cfg.output_dir / "cp_generalization"
+    print(f"saved transfer metrics: {output_dir / 'cp_even_odd_generalization_metrics.json'}")
+    return metrics
+
+
 def _cache_subdir(cache_dir: Path | None, name: str) -> Path | None:
     if cache_dir is None:
         return None
     return cache_dir / name
+
+
+def _load_encoder_checkpoint(
+    *,
+    cfg: Any,
+    model_path: Path | None,
+    allow_transfer_config: bool,
+    command_name: str,
+) -> tuple[Path, EncoderOnlyClassifier]:
+    resolved_model_path = (
+        model_path
+        or (cfg.transfer.encoder_model if allow_transfer_config else None)
+        or _default_encoder_checkpoint(cfg.output_dir)
+    )
+    trained = load_pickle(resolved_model_path)
+    if not isinstance(trained, EncoderOnlyClassifier):
+        raise TypeError(f"{command_name} --model must point to a saved EncoderOnlyClassifier.")
+    return Path(resolved_model_path), trained
 
 
 def _default_encoder_checkpoint(output_dir: Path) -> Path:

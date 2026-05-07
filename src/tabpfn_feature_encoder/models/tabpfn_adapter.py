@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from tabpfn_feature_encoder.models.encoders import require_torch
+from tabpfn_feature_encoder.models.torch_utils import require_torch
 
 
 @dataclass

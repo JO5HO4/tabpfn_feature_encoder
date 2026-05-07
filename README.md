@@ -40,7 +40,7 @@ hybrid output to TabPFN:
 particles + scalars -> GNN + event summaries -> 128D event vector -> TabPFN
 ```
 
-Run it with [configs/cp_gnn.yaml](configs/cp_gnn.yaml). The GNN ignores particle
+Run it with [configs/source_gnn.yaml](configs/source_gnn.yaml). The GNN ignores particle
 `max` values and uses all particles present in each event. The `max` entries in
 the config are used by the flat residual default.
 
@@ -52,7 +52,7 @@ self-attention over all particles in an event:
 particles + scalars -> particle transformer + event summaries -> 128D event vector -> TabPFN
 ```
 
-Run it with [configs/cp_transformer.yaml](configs/cp_transformer.yaml), or set
+Run it with [configs/source_transformer.yaml](configs/source_transformer.yaml), or set
 `encoder.type: transformer` in another config. `hidden_dim` must be divisible by
 `attention_heads`.
 
@@ -70,10 +70,10 @@ residual scale:
 encoder(x) = x * (1 + residual_scale * tanh(gate))
 ```
 
-Training clips encoder gradients, keeps TabPFN frozen, detaches support/context
-embeddings before fitting the TabPFN prompt, restores the best validation encoder
-if an epoch hurts validation AUC, and stops early after repeated non-improving
-epochs.
+Source training clips encoder gradients, keeps TabPFN out of the optimization
+loop, restores the best validation-AUC encoder, and stops early after repeated
+non-improving epochs. TabPFN is used only after source training, when the encoder
+is frozen for CP even/odd and open-data generalization.
 
 ## Environment
 
@@ -111,10 +111,10 @@ PY
 
 ## Configuration
 
-The main config is [configs/cp_encoder.yaml](configs/cp_encoder.yaml).
+The main config is [configs/source_residual_mlp.yaml](configs/source_residual_mlp.yaml).
 
 ```yaml
-output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_multiclass_residual
+output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_residual_mlp
 cache_dir: /pscratch/sd/j/joshuaho/tabpfn
 seed: 42
 device: cuda
@@ -167,7 +167,7 @@ dataset:
 
 transfer:
   raw_dir: /global/cfs/projectdirs/atlas/haichen/opendata/GamGam_data
-  output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/gamgam_transfer
+  output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_residual_mlp/open_data_generalization
   tree_name: mini
   context_size: 1024
   query_chunk_size: 1024
@@ -209,7 +209,7 @@ event particle count, per-type particle counts, pooled particle statistics, and
 per-particle-type pooled statistics. Start from:
 
 ```bash
-bash scripts/run_cp_encoder.sh configs/cp_gnn.yaml
+bash scripts/run_source_encoder.sh configs/source_gnn.yaml
 ```
 
 With `type: transformer`, the same `output_dim` and event-summary behavior apply,
@@ -217,23 +217,23 @@ but the learned representation comes from particle self-attention instead of GNN
 message passing. Start from:
 
 ```bash
-bash scripts/run_cp_encoder.sh configs/cp_transformer.yaml
+bash scripts/run_source_encoder.sh configs/source_transformer.yaml
 ```
 
 With `type: residual_mlp`, `type: feature_mixer`, or `type: feature_gate`,
 `output_dim` must match the number of flat input features, currently 72.
 
-Validation uses one fixed 1024-event context from the validation split, then
-scores every remaining validation event as query in 1024-event chunks. This uses
-almost the full validation set for metrics while keeping the TabPFN context and
-query chunks in the same size regime as training.
+Source validation is the direct 12-class classifier validation split and drives
+early stopping. Downstream TabPFN tests use either the CP context/query sizes
+derived from `batch_size * support_query_ratio`, or the explicit
+`transfer.context_size` and `transfer.query_chunk_size` values for open data.
 
 ## Data Cache
 
 The first run reads ROOT files and saves processed `DatasetBundle` caches under:
 
 ```text
-/pscratch/sd/j/joshuaho/tabpfn/cp_encoder/
+/pscratch/sd/j/joshuaho/tabpfn/source_multiclass/
 /pscratch/sd/j/joshuaho/tabpfn/gamgam_production_modes/
 ```
 
@@ -243,18 +243,18 @@ features were built. If those change, a new cache file is created.
 
 When a cache does not exist yet, ROOT-to-feature creation is parallelized across
 the configured input files. The worker count is
-`min(os.cpu_count() or 1, number_of_files)`, so the CP task uses two workers for
-the two CP ROOT files and the GamGam transfer task uses up to five workers for
-the five production-mode files. During graph construction, each worker prints a
-progress line every 50K events processed, plus one final line when that file is
-complete.
+`min(os.cpu_count() or 1, number_of_files)`, so source training can use up to 12
+workers, the held-out CP generalization task uses two workers, and the GamGam
+transfer task uses up to five workers. During graph construction, each worker
+prints a progress line every 50K events processed, plus one final line when that
+file is complete.
 
 ## Training
 
 Recommended launcher:
 
 ```bash
-bash scripts/run_cp_encoder.sh
+bash scripts/run_source_encoder.sh
 ```
 
 The launcher:
@@ -268,19 +268,19 @@ To force a specific TabPFN checkpoint:
 
 ```bash
 export TABPFN_MODEL_PATH=/path/to/model.ckpt
-bash scripts/run_cp_encoder.sh
+bash scripts/run_source_encoder.sh
 ```
 
 To use a different config:
 
 ```bash
-bash scripts/run_cp_encoder.sh configs/other.yaml
+bash scripts/run_source_encoder.sh configs/other.yaml
 ```
 
 Equivalent direct CLI:
 
 ```bash
-tabpfn-encoder-train train --config configs/cp_encoder.yaml
+tabpfn-encoder-train train --config configs/source_residual_mlp.yaml
 ```
 
 ## Source Training
@@ -301,7 +301,8 @@ open-data generalization with TabPFN:
 
 The default `train` command runs the 5-class ATLAS open-data Higgs
 production-mode task after CP even/odd. The separate `transfer` command reruns
-that same open-data comparison from a saved checkpoint:
+that same open-data comparison from a saved checkpoint. The separate
+`transfer-cp` command reruns only the held-out CP even/odd comparison.
 
 ```text
 ttH vs ggF vs VBF vs WH vs ZH
@@ -312,8 +313,29 @@ It compares two TabPFN evaluations on the same GamGam train/test split:
 1. `frozen_encoder_tabpfn`: source-trained encoder is frozen, open-data events are encoded, then TabPFN is fit on encoded context events.
 2. `baseline_tabpfn`: TabPFN is fit directly on CP-compatible flat open-data features.
 
-Run the standalone transfer command after training the source encoder when you
-want to rerun only the open-data comparison:
+Run the standalone CP transfer command after training when you want to rerun only
+the CP even/odd comparison:
+
+```bash
+bash scripts/run_cp_transfer.sh
+```
+
+or directly:
+
+```bash
+tabpfn-encoder-train transfer-cp --config configs/source_residual_mlp.yaml
+```
+
+CP transfer outputs are written to `output_dir/cp_generalization`:
+
+```text
+cp_even_odd_generalization_metrics.json
+cp_even_odd_generalization_frozen_encoder_proba.npy
+cp_even_odd_generalization_baseline_proba.npy
+```
+
+Run the standalone open-data transfer command when you want to rerun only the
+GamGam comparison:
 
 ```bash
 bash scripts/run_gamgam_transfer.sh
@@ -322,18 +344,22 @@ bash scripts/run_gamgam_transfer.sh
 or directly:
 
 ```bash
-tabpfn-encoder-train transfer --config configs/cp_encoder.yaml
+tabpfn-encoder-train transfer --config configs/source_residual_mlp.yaml
 ```
 
 To evaluate a specific saved encoder:
 
 ```bash
+tabpfn-encoder-train transfer-cp \
+  --config configs/source_residual_mlp.yaml \
+  --model /path/to/encoder_classifier.pkl
+
 tabpfn-encoder-train transfer \
-  --config configs/cp_encoder.yaml \
+  --config configs/source_residual_mlp.yaml \
   --model /path/to/encoder_classifier.pkl
 ```
 
-Transfer outputs are written to `transfer.output_dir`:
+Open-data transfer outputs are written to `transfer.output_dir`:
 
 ```text
 open_data_generalization_metrics.json
@@ -363,7 +389,7 @@ open_data_generalization delta: accuracy=..., log_loss=..., roc_auc=...
 Metrics are printed to three decimal places in the terminal. Saved CSV/JSON files
 keep full precision.
 
-Use `configs/cp_gnn.yaml` or `configs/cp_transformer.yaml` for graph experiments.
+Use `configs/source_gnn.yaml` or `configs/source_transformer.yaml` for graph experiments.
 For transformer runs, the settings line also prints `attention_heads`.
 
 ## Outputs

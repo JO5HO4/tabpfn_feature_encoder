@@ -55,7 +55,7 @@ class EventGraphDataset:
         )
 
     def to_batch(self, indices: np.ndarray, *, device: str) -> GraphBatch:
-        from tabpfn_feature_encoder.models.encoders import require_torch
+        from tabpfn_feature_encoder.models.torch_utils import require_torch
 
         torch_mod, _ = require_torch()
         idx = np.asarray(indices, dtype=np.int64)

@@ -35,8 +35,8 @@ Generalization metrics:
 Benchmark outputs should include:
 
 - `metrics.json`
-- `cp_generalization/cp_even_odd_generalization_metrics.json`
-- `open_data_generalization_metrics.json` from default training or the transfer command
+- `cp_generalization/cp_even_odd_generalization_metrics.json` from default training or `transfer-cp`
+- `open_data_generalization_metrics.json` from default training or the open-data transfer command
 
 Terminal output should report, at minimum:
 

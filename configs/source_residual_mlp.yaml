@@ -1,13 +1,13 @@
-output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_multiclass_gnn
+output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_residual_mlp
 cache_dir: /pscratch/sd/j/joshuaho/tabpfn
 seed: 42
 device: cuda
 
 encoder:
-  type: gnn
-  layers: 3
-  hidden_dim: 128
-  output_dim: 128
+  type: residual_mlp
+  layers: 4
+  hidden_dim: 64
+  output_dim: 72
   epochs: 20
   learning_rate: 0.00005
   batch_size: 2048
@@ -51,7 +51,7 @@ dataset:
 
 transfer:
   raw_dir: /global/cfs/projectdirs/atlas/haichen/opendata/GamGam_data
-  output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/gamgam_transfer
+  output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_residual_mlp/open_data_generalization
   tree_name: mini
   context_size: 1024
   query_chunk_size: 1024

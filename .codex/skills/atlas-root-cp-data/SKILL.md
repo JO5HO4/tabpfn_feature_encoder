@@ -9,7 +9,7 @@ description: Use when changing ATLAS CP ROOT data loading, branch configuration,
 
 - Dataset code: `src/tabpfn_feature_encoder/data/atlas_root.py`.
 - Preprocessing helpers: `src/tabpfn_feature_encoder/data/preprocessing.py`.
-- Config section: `dataset` in `configs/cp_encoder.yaml`.
+- Config section: `dataset` in `configs/source_residual_mlp.yaml`.
 - All rows from every configured ROOT file are used. Do not reintroduce `events_per_class` sampling unless explicitly requested.
 - Default source training uses 12 classes and intentionally excludes `ttH_NLO.root` and `ttH_CPodd.root` for CP even/odd generalization.
 - Current split is stratified 50/25/25 train/validation/test.

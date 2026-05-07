@@ -9,8 +9,8 @@ from tabpfn_feature_encoder.data.base import DatasetBundle
 from tabpfn_feature_encoder.data.graphs import EventGraphDataset
 from tabpfn_feature_encoder.data.preprocessing import Standardizer, stratified_sample_indices
 from tabpfn_feature_encoder.evaluation.metrics import accuracy, log_loss, roc_auc
-from tabpfn_feature_encoder.models.encoders import require_torch
 from tabpfn_feature_encoder.models.tabpfn_adapter import TabPFNPromptAdapter
+from tabpfn_feature_encoder.models.torch_utils import require_torch
 from tabpfn_feature_encoder.training.encoder_classifier import EncoderOnlyClassifier
 from tabpfn_feature_encoder.utils.io import save_json
 
