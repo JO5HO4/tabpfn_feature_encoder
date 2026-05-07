@@ -83,6 +83,36 @@ def test_build_encoder_selects_feature_mixer() -> None:
     assert isinstance(encoder, FeatureMixerEncoder)
 
 
+def test_build_encoder_keeps_residual_mlp_strictly_residual() -> None:
+    encoder = build_encoder(
+        encoder_type="residual_mlp",
+        input_dim=4,
+        hidden_dim=8,
+        output_dim=4,
+        layers=2,
+        residual_scale=0.1,
+    )
+
+    assert isinstance(encoder, MLPEncoder)
+    assert encoder.uses_identity_residual
+
+
+def test_build_encoder_rejects_residual_mlp_projection() -> None:
+    try:
+        build_encoder(
+            encoder_type="residual_mlp",
+            input_dim=4,
+            hidden_dim=8,
+            output_dim=3,
+            layers=2,
+            residual_scale=0.1,
+        )
+    except ValueError as exc:
+        assert "output_dim" in str(exc)
+    else:
+        raise AssertionError("residual_mlp should reject non-identity output dimensions.")
+
+
 def test_lightweight_gnn_encoder_outputs_event_embeddings() -> None:
     graphs = EventGraphDataset(
         nodes=[

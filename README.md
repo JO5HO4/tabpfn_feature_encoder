@@ -15,21 +15,34 @@ a frozen TabPFN classifier.
 5. Train on batches from the train split. Each batch is split 50/50 into support and query.
 6. Fit TabPFN on the encoded support features and compute loss on the encoded query features.
 7. At the end of each epoch, evaluate with a fixed validation context and the remaining validation events as query.
-8. Hold out the test split for later. It is not used during training right now.
+8. Hold out the test split during training, then use it only for final benchmark metrics.
 
 ## Encoder Choice
 
-The default encoder is now a lightweight GNN that uses every configured particle
-in each event. It builds particle nodes from the jagged ROOT branches, runs a
-small message-passing network, appends fixed event-summary features, and passes
-a 128D hybrid output to TabPFN:
+The default encoder is deliberately simple: a flat residual MLP initialized as
+the identity. With the current CP feature set, `output_dim: 72` matches the raw
+flat feature count, so the initial encoder is exactly the standardized TabPFN
+input and training can only learn a small residual correction:
+
+```text
+encoder(x) = x + residual_scale * residual_mlp(x)
+```
+
+`residual_mlp` is strict: `output_dim` must equal the flat input feature count.
+Use `mlp` only if you intentionally want a pure learned projection.
+
+The repo also includes a lightweight GNN that uses every configured particle in
+each event. It builds particle nodes from the jagged ROOT branches, runs a small
+message-passing network, appends fixed event-summary features, and passes a 128D
+hybrid output to TabPFN:
 
 ```text
 particles + scalars -> GNN + event summaries -> 128D event vector -> TabPFN
 ```
 
-The GNN ignores particle `max` values and uses all particles present in each
-event. The `max` entries in the config are only for the flat fallback features.
+Run it with [configs/cp_gnn.yaml](configs/cp_gnn.yaml). The GNN ignores particle
+`max` values and uses all particles present in each event. The `max` entries in
+the config are used by the flat residual default.
 
 The repo also includes a particle transformer encoder. It uses the same graph
 inputs and fixed event summaries as the GNN, but replaces message passing with
@@ -43,23 +56,18 @@ Run it with [configs/cp_transformer.yaml](configs/cp_transformer.yaml), or set
 `encoder.type: transformer` in another config. `hidden_dim` must be divisible by
 `attention_heads`.
 
-The code also supports flat encoders. Set `encoder.type` to `feature_mixer` for
-a stable residual linear feature mixer:
+The code also supports simpler flat residual variants. Set `encoder.type` to
+`feature_mixer` for a stable residual linear feature mixer:
 
 ```text
 encoder(x) = x + residual_scale * linear(x)
 ```
 
-Set `encoder.type` to `feature_gate` for the most conservative flat encoder:
+Set `encoder.type` to `feature_gate` for the most conservative per-feature
+residual scale:
 
 ```text
 encoder(x) = x * (1 + residual_scale * tanh(gate))
-```
-
-or `residual_mlp` for a more expressive flat MLP:
-
-```text
-encoder(x) = x + residual_scale * residual_mlp(x)
 ```
 
 Training clips encoder gradients, keeps TabPFN frozen, detaches support/context
@@ -106,22 +114,21 @@ PY
 The main config is [configs/cp_encoder.yaml](configs/cp_encoder.yaml).
 
 ```yaml
-output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/cp_encoder_general_gnn
+output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/cp_encoder_residual
 cache_dir: /pscratch/sd/j/joshuaho/tabpfn
 seed: 42
 device: cuda
 
 encoder:
-  type: gnn
-  layers: 3
-  hidden_dim: 128
-  output_dim: 128
+  type: residual_mlp
+  layers: 4
+  hidden_dim: 64
+  output_dim: 72
   epochs: 20
   learning_rate: 0.00005
   batch_size: 2048
   support_query_ratio: 0.5
   residual_scale: 0.1
-  identity_weight: 0.0
   grad_clip_norm: 0.1
   early_stopping_patience: 8
   min_delta: 0.001
@@ -182,12 +189,20 @@ support: 1024
 query: 1024
 ```
 
+With the default `type: residual_mlp`, `output_dim: 72` is the flat feature count
+sent to TabPFN. The residual branch is zero-initialized, so epoch-zero behavior is
+the raw standardized TabPFN baseline.
+
 With `type: gnn`, `output_dim: 128` is the event embedding size sent to TabPFN.
 The GNN embedding is intentionally hybrid: it concatenates a learned graph
 representation with fixed graph summary features, including global features,
 event particle count, per-type particle counts, pooled particle statistics, and
-per-particle-type pooled statistics. This is meant to preserve production-mode
-information when the encoder is frozen for GamGam transfer.
+per-particle-type pooled statistics. Start from:
+
+```bash
+bash scripts/run_cp_encoder.sh configs/cp_gnn.yaml
+```
+
 With `type: transformer`, the same `output_dim` and event-summary behavior apply,
 but the learned representation comes from particle self-attention instead of GNN
 message passing. Start from:
@@ -196,27 +211,8 @@ message passing. Start from:
 bash scripts/run_cp_encoder.sh configs/cp_transformer.yaml
 ```
 
-With `type: feature_mixer` or `type: feature_gate`, `output_dim` must match the
-number of flat input features, currently 72.
-
-To switch back to a flat MLP-style encoder, change only the encoder block:
-
-```yaml
-encoder:
-  type: residual_mlp
-  layers: 4
-  hidden_dim: 64
-  output_dim: 72
-  epochs: 20
-  learning_rate: 0.00005
-  batch_size: 2048
-  support_query_ratio: 0.5
-  residual_scale: 0.1
-  identity_weight: 10.0
-  grad_clip_norm: 0.1
-  early_stopping_patience: 5
-  min_delta: 0.0
-```
+With `type: residual_mlp`, `type: feature_mixer`, or `type: feature_gate`,
+`output_dim` must match the number of flat input features, currently 72.
 
 Validation uses one fixed 1024-event context from the validation split, then
 scores every remaining validation event as query in 1024-event chunks. This uses
@@ -344,13 +340,13 @@ A run should look like:
 ```text
 Using TabPFN model: ...
 Loading cached dataset: ...
-EncoderTabPFN settings: type=gnn, device=cuda, layers=3, hidden_dim=128, output_dim=128, batch_size=2048, support_query_ratio=0.5, identity_residual=False, residual_scale=1.0, identity_weight=0.0, grad_clip_norm=0.1, early_stopping_patience=8, summary_dim=85, learned_dim=43
+EncoderTabPFN settings: type=residual_mlp, device=cuda, layers=4, hidden_dim=64, output_dim=72, batch_size=2048, support_query_ratio=0.5, identity_residual=True, residual_scale=0.1, identity_weight=0.0, grad_clip_norm=0.1, early_stopping_patience=8
 initial val: context=1024, query=48976, val_log_loss=..., val_accuracy=..., val_roc_auc=..., val_p1_mean=..., val_p1_std=...
 epoch 1/20: train_loss=..., train_accuracy=..., train_roc_auc=..., batches=49/49
 epoch 1/20 val: context=1024, query=48976, val_log_loss=..., val_accuracy=..., val_roc_auc=..., val_p1_mean=..., val_p1_std=...
 restored best encoder after epoch 1 (best_val_roc_auc=...)
 early stopping: no validation AUC improvement for 8 epochs
-Encoder-only classifier settings: type=gnn, device=cuda, layers=3, hidden_dim=128, output_dim=128, batch_size=2048
+Encoder-only classifier settings: type=residual_mlp, device=cuda, layers=4, hidden_dim=64, output_dim=72, batch_size=2048
 encoder_only epoch 1/20: train_loss=..., train_accuracy=..., train_roc_auc=..., batches=49/49, val_loss=..., val_accuracy=..., val_roc_auc=...
 Nominal benchmark test metrics:
 baseline_tabpfn: test_accuracy=..., test_roc_auc=..., test_log_loss=...
@@ -364,8 +360,8 @@ keep full precision.
 
 Earlier CP-only GNN checkpoints reached validation AUC around `0.66`, but their
 frozen embeddings underperformed flat TabPFN on GamGam transfer. The current
-default GNN is therefore summary-preserving and writes to a new output directory;
-retrain it before rerunning transfer.
+default is therefore the more conservative residual flat encoder; use
+`configs/cp_gnn.yaml` or `configs/cp_transformer.yaml` for graph experiments.
 
 For transformer runs, the settings line also prints `attention_heads`.
 

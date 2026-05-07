@@ -8,7 +8,8 @@ description: Use when running, configuring, validating, or documenting the tabpf
 ## Repo Basics
 
 - Repo root: `tabpfn-feature-encoder`.
-- Main CP GNN config: `configs/cp_encoder.yaml`.
+- Main CP residual config: `configs/cp_encoder.yaml`.
+- Particle GNN config: `configs/cp_gnn.yaml`.
 - Particle transformer config: `configs/cp_transformer.yaml`.
 - Launcher: `bash scripts/run_cp_encoder.sh`.
 - Package CLI: `tabpfn-encoder-train train --config configs/cp_encoder.yaml`.
@@ -33,6 +34,7 @@ The runner falls back to `conda run --no-capture-output -n tabpfn` if the consol
 - Sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` unless already set.
 - Reuses an existing checkpoint from `~/.cache/tabpfn` when available.
 - Accepts an optional config path: `bash scripts/run_cp_encoder.sh configs/other.yaml`.
+- Runs the GNN with: `bash scripts/run_cp_encoder.sh configs/cp_gnn.yaml`.
 - Runs the transformer with: `bash scripts/run_cp_encoder.sh configs/cp_transformer.yaml`.
 
 ## Validation Commands

@@ -18,8 +18,8 @@ For the current config, `output_dim: 72` matches the feature count.
 ## Training And Validation Protocol
 
 - Train batches are split by `support_query_ratio`.
-- Current `batch_size: 4096` means `2048` support and `2048` query.
-- Validation samples `batch_size` events from the validation split each epoch and also splits 50/50.
+- Current `batch_size: 2048` means `1024` support and `1024` query.
+- Validation uses a fixed validation context and scores the remaining validation rows as query.
 - `initial val` is computed before optimizer updates; it should be close to the raw TabPFN baseline.
 
 ## Collapse Signals
@@ -38,7 +38,6 @@ The trainer currently stabilizes updates with:
 - identity residual initialization
 - residual scale `0.1`
 - support prompt detached in `_episode_step`
-- identity regularization
 - gradient clipping at `max_norm=0.1`
 
 ## CUDA OOM
@@ -70,4 +69,3 @@ bash scripts/run_cp_encoder.sh
 ```
 
 If TabPFN attempts an interactive license flow, the checkpoint path is not being used.
-

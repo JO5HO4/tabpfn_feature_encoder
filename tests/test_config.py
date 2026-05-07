@@ -102,11 +102,11 @@ def test_encoder_defaults_match_main_training_config() -> None:
     cfg = ProjectConfig.from_dict({"output_dir": "/tmp/demo"})
 
     assert cfg.device == "cuda"
-    assert cfg.encoder.type == "gnn"
-    assert cfg.encoder.layers == 3
-    assert cfg.encoder.hidden_dim == 128
+    assert cfg.encoder.type == "residual_mlp"
+    assert cfg.encoder.layers == 4
+    assert cfg.encoder.hidden_dim == 64
     assert cfg.encoder.attention_heads == 4
-    assert cfg.encoder.output_dim == 128
+    assert cfg.encoder.output_dim == 72
     assert cfg.encoder.learning_rate == 5e-5
     assert cfg.encoder.batch_size == 2048
     assert cfg.encoder.identity_weight == 0.0

@@ -390,10 +390,7 @@ class LightweightGNNEncoder(TorchModule):
 
         for message_layer, norm in zip(self.message_layers, self.message_norms, strict=True):
             pooled = _scatter_mean(node_hidden, batch_index, n_graphs)
-            if node_hidden.shape[0] == 0:
-                messages = node_hidden
-            else:
-                messages = pooled[batch_index]
+            messages = node_hidden if node_hidden.shape[0] == 0 else pooled[batch_index]
             update = message_layer(torch_mod.cat([node_hidden, messages], dim=1))
             node_hidden = norm(node_hidden + update)
 
@@ -569,7 +566,19 @@ def build_encoder(
             output_dim=output_dim,
             residual_scale=residual_scale,
         )
-    if kind in {"residual_mlp", "mlp"}:
+    if kind in {"residual", "residual_mlp"}:
+        if output_dim != input_dim:
+            raise ValueError(
+                "residual_mlp requires encoder.output_dim to equal the flat input feature count."
+            )
+        return MLPEncoder(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            output_dim=output_dim,
+            layers=layers,
+            residual_scale=residual_scale,
+        )
+    if kind == "mlp":
         return MLPEncoder(
             input_dim=input_dim,
             hidden_dim=hidden_dim,

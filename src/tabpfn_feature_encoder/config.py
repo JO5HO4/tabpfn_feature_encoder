@@ -9,11 +9,11 @@ import yaml
 
 @dataclass(frozen=True)
 class EncoderConfig:
-    type: str = "gnn"
-    layers: int = 3
-    hidden_dim: int = 128
+    type: str = "residual_mlp"
+    layers: int = 4
+    hidden_dim: int = 64
     attention_heads: int = 4
-    output_dim: int = 128
+    output_dim: int = 72
     epochs: int = 20
     learning_rate: float = 5e-5
     batch_size: int = 2048
@@ -25,8 +25,8 @@ class EncoderConfig:
     min_delta: float = 0.001
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "EncoderConfig":
-        encoder_type = str(payload.get("type", payload.get("kind", "gnn")))
+    def from_dict(cls, payload: dict[str, Any]) -> EncoderConfig:
+        encoder_type = str(payload.get("type", payload.get("kind", "residual_mlp")))
         support_query_ratio = float(payload.get("support_query_ratio", 0.5))
         residual_scale = float(payload.get("residual_scale", 0.1))
         identity_weight = float(payload.get("identity_weight", 0.0))
@@ -50,10 +50,10 @@ class EncoderConfig:
             raise ValueError("encoder.min_delta must be non-negative.")
         return cls(
             type=encoder_type,
-            layers=int(payload.get("layers", 3)),
-            hidden_dim=int(payload.get("hidden_dim", 128)),
+            layers=int(payload.get("layers", 4)),
+            hidden_dim=int(payload.get("hidden_dim", 64)),
             attention_heads=attention_heads,
-            output_dim=int(payload.get("output_dim", 128)),
+            output_dim=int(payload.get("output_dim", 72)),
             epochs=int(payload.get("epochs", 20)),
             learning_rate=float(payload.get("learning_rate", 5e-5)),
             batch_size=int(payload.get("batch_size", 2048)),
@@ -73,7 +73,7 @@ class ParticleBranchConfig:
     max_particles: int
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ParticleBranchConfig":
+    def from_dict(cls, payload: dict[str, Any]) -> ParticleBranchConfig:
         if "name" not in payload:
             raise KeyError("Missing required config key: dataset.particles[].name")
         if "branches" not in payload:
@@ -96,7 +96,7 @@ class LabelFileConfig:
     files: list[str]
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "LabelFileConfig":
+    def from_dict(cls, payload: dict[str, Any]) -> LabelFileConfig:
         if "label" not in payload:
             raise KeyError("Missing required config key: dataset.labels[].label")
         if "files" not in payload:
@@ -119,7 +119,7 @@ class NamedLabelFileConfig:
     files: list[str]
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "NamedLabelFileConfig":
+    def from_dict(cls, payload: dict[str, Any]) -> NamedLabelFileConfig:
         if "label" not in payload:
             raise KeyError("Missing required config key: transfer.labels[].label")
         if "name" not in payload:
@@ -145,7 +145,7 @@ class SplitConfig:
     test: float = 0.25
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "SplitConfig":
+    def from_dict(cls, payload: dict[str, Any]) -> SplitConfig:
         split = cls(
             train=float(payload.get("train", 0.5)),
             val=float(payload.get("val", 0.25)),
@@ -176,7 +176,7 @@ class DatasetConfig:
     padding: str = "zero"
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "DatasetConfig":
+    def from_dict(cls, payload: dict[str, Any]) -> DatasetConfig:
         scalars = payload.get("scalars", [])
         if not isinstance(scalars, list):
             raise TypeError("dataset.scalars must be a list.")
@@ -225,7 +225,7 @@ class TransferConfig:
     encoder_model: Path | None = None
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "TransferConfig":
+    def from_dict(cls, payload: dict[str, Any]) -> TransferConfig:
         split_payload = payload.get("split", {})
         if not isinstance(split_payload, dict):
             raise TypeError("transfer.split must be a mapping.")
@@ -267,7 +267,7 @@ class ProjectConfig:
     metrics: list[str] = field(default_factory=lambda: ["roc_auc", "accuracy"])
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ProjectConfig":
+    def from_dict(cls, payload: dict[str, Any]) -> ProjectConfig:
         if "output_dir" not in payload:
             raise KeyError("Missing required config key: output_dir")
         encoder_payload = payload.get("encoder", {})
@@ -295,7 +295,7 @@ class ProjectConfig:
 
 
 def load_project_config(path: str | Path) -> ProjectConfig:
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         payload = yaml.safe_load(handle)
     if not isinstance(payload, dict):
         raise TypeError("Config root must be a mapping.")
