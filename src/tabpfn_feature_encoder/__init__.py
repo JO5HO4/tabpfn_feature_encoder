@@ -1,6 +1,6 @@
-"""Tools for training learned feature encoders in front of TabPFN."""
+"""Tools for training learned feature encoders for TabPFN transfer tests."""
 
-from tabpfn_feature_encoder.training.trainer import EncoderTabPFNClassifier
+from tabpfn_feature_encoder.training.encoder_classifier import EncoderOnlyClassifier
 
-__all__ = ["EncoderTabPFNClassifier"]
+__all__ = ["EncoderOnlyClassifier"]
 __version__ = "0.1.0"

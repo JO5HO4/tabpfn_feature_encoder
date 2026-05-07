@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +10,11 @@ import numpy as np
 import pandas as pd
 
 from tabpfn_feature_encoder.data.atlas_root import (
-    AtlasFeatureBuilder,
     RootEventLoader,
     _finite_float,
     _print_event_progress,
     _safe_sequence,
+    pad_jagged,
 )
 from tabpfn_feature_encoder.data.base import DatasetBundle
 from tabpfn_feature_encoder.data.graphs import EventGraphDataset
@@ -45,25 +45,7 @@ class GamGamDatasetBuilder:
     tree_name: str = "mini"
     cache_dir: Path | None = None
     use_cache: bool = True
-    flat_scalar_cols: list[str] = field(
-        default_factory=lambda: ["met_et", "met_phi", "jet_n", "photon_n", "lep_n"]
-    )
-    flat_jagged_maxlen: dict[str, int] = field(
-        default_factory=lambda: {
-            "jet_pt": 10,
-            "jet_eta": 10,
-            "jet_phi": 10,
-            "jet_MV2c10": 10,
-            "photon_pt": 4,
-            "photon_eta": 4,
-            "photon_phi": 4,
-            "lep_pt": 4,
-            "lep_eta": 4,
-            "lep_phi": 4,
-            "lep_charge": 4,
-            "lep_type": 4,
-        }
-    )
+    build_graphs: bool = True
 
     def build(self) -> DatasetBundle:
         cache_path = self._cache_path()
@@ -82,15 +64,10 @@ class GamGamDatasetBuilder:
         return bundle
 
     def _build_from_root(self) -> DatasetBundle:
-        flat_builder = AtlasFeatureBuilder(
-            scalar_cols=self.flat_scalar_cols,
-            jagged_maxlen=self.flat_jagged_maxlen,
-            padding="zero",
-        )
-        graph_builder = GamGamGraphBuilder()
-        columns = list(
-            dict.fromkeys([*flat_builder.input_columns(), *graph_builder.input_columns()])
-        )
+        flat_builder = GamGamCPFeatureBuilder()
+        graph_builder = GamGamGraphBuilder() if self.build_graphs else None
+        graph_columns = [] if graph_builder is None else graph_builder.input_columns()
+        columns = list(dict.fromkeys([*flat_builder.input_columns(), *graph_columns]))
 
         X_parts: list[pd.DataFrame] = []
         graph_parts: list[EventGraphDataset] = []
@@ -133,14 +110,15 @@ class GamGamDatasetBuilder:
                 feature_names = [str(col) for col in result.features.columns]
             X_file = result.features.reindex(columns=feature_names, fill_value=np.nan)
             X_parts.append(X_file)
-            graph_parts.append(result.graph)
+            if result.graph is not None:
+                graph_parts.append(result.graph)
             y_parts.append(np.full(len(X_file), int(result.label), dtype=np.int64))
 
         if feature_names is None:
             raise ValueError("No GamGam modes were configured.")
 
         X_all = pd.concat(X_parts, ignore_index=True)
-        graph_all = EventGraphDataset.concat(graph_parts)
+        graph_all = EventGraphDataset.concat(graph_parts) if graph_parts else None
         y_all = np.concatenate(y_parts)
         self._validate_split()
 
@@ -164,9 +142,9 @@ class GamGamDatasetBuilder:
         y_val = y_all[val_idx]
         X_test = X_all.iloc[test_idx].reset_index(drop=True)
         y_test = y_all[test_idx]
-        graph_train = graph_all.subset(train_idx)
-        graph_val = graph_all.subset(val_idx)
-        graph_test = graph_all.subset(test_idx)
+        graph_train = graph_all.subset(train_idx) if graph_all is not None else None
+        graph_val = graph_all.subset(val_idx) if graph_all is not None else None
+        graph_test = graph_all.subset(test_idx) if graph_all is not None else None
 
         imputer = MedianImputer().fit(X_train)
         X_train = imputer.transform(X_train).reset_index(drop=True)
@@ -198,7 +176,9 @@ class GamGamDatasetBuilder:
                     "val": self.val_fraction,
                     "test": self.test_fraction,
                 },
-                "graph_features": {
+                "graph_features": None
+                if graph_all is None
+                else {
                     "node_features": graph_all.node_feature_names,
                     "global_features": graph_all.global_feature_names,
                 },
@@ -225,9 +205,11 @@ class GamGamDatasetBuilder:
             "val_fraction": self.val_fraction,
             "test_fraction": self.test_fraction,
             "random_state": self.random_state,
-            "flat_scalar_cols": self.flat_scalar_cols,
-            "flat_jagged_maxlen": self.flat_jagged_maxlen,
-            "graph_schema": GamGamGraphBuilder().node_feature_names(),
+            "build_graphs": self.build_graphs,
+            "flat_schema": GamGamCPFeatureBuilder().feature_names(),
+            "graph_schema": None
+            if not self.build_graphs
+            else GamGamGraphBuilder().node_feature_names(),
         }
         return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
@@ -243,6 +225,124 @@ class GamGamDatasetBuilder:
         total = self.train_fraction + self.val_fraction + self.test_fraction
         if not np.isclose(total, 1.0):
             raise ValueError("train/val/test fractions must sum to 1.0.")
+
+
+@dataclass(frozen=True)
+class GamGamCPFeatureBuilder:
+    """Build a 72-column flat feature view matching the CP source schema."""
+
+    jet_max: int = 10
+    lepton_max: int = 3
+    photon_max: int = 2
+
+    def input_columns(self) -> list[str]:
+        return [
+            "met_et",
+            "met_phi",
+            "jet_pt",
+            "jet_eta",
+            "jet_phi",
+            "jet_MV2c10",
+            "photon_pt",
+            "photon_eta",
+            "photon_phi",
+            "lep_pt",
+            "lep_eta",
+            "lep_phi",
+            "lep_charge",
+            "lep_type",
+        ]
+
+    def feature_names(self) -> list[str]:
+        names = ["MET_met", "MET_phi"]
+        for branch in ("jet_pt", "jet_eta", "jet_phi", "jet_btag"):
+            names.extend(f"{branch}_{idx}" for idx in range(self.jet_max))
+        for prefix in ("ele", "mu"):
+            for suffix in ("pt", "eta", "phi", "charge"):
+                names.extend(f"{prefix}_{suffix}_{idx}" for idx in range(self.lepton_max))
+        for branch in ("ph_pt", "ph_eta", "ph_phi"):
+            names.extend(f"{branch}_{idx}" for idx in range(self.photon_max))
+        return names
+
+    def build(self, df: pd.DataFrame) -> pd.DataFrame:
+        parts: list[pd.DataFrame] = [
+            pd.DataFrame(
+                {
+                    "MET_met": self._scalar(df, "met_et"),
+                    "MET_phi": self._scalar(df, "met_phi"),
+                },
+                index=df.index,
+            )
+        ]
+        parts.extend(
+            [
+                self._jagged(df, "jet_pt", "jet_pt", self.jet_max),
+                self._jagged(df, "jet_eta", "jet_eta", self.jet_max),
+                self._jagged(df, "jet_phi", "jet_phi", self.jet_max),
+                self._jagged(df, "jet_MV2c10", "jet_btag", self.jet_max),
+            ]
+        )
+        for particle_code, prefix in ((11, "ele"), (13, "mu")):
+            split = self._split_leptons(df, particle_code)
+            for suffix in ("pt", "eta", "phi", "charge"):
+                parts.append(
+                    pd.DataFrame(
+                        pad_jagged(pd.Series(split[suffix], index=df.index), self.lepton_max),
+                        columns=[f"{prefix}_{suffix}_{idx}" for idx in range(self.lepton_max)],
+                        index=df.index,
+                    )
+                )
+        parts.extend(
+            [
+                self._jagged(df, "photon_pt", "ph_pt", self.photon_max),
+                self._jagged(df, "photon_eta", "ph_eta", self.photon_max),
+                self._jagged(df, "photon_phi", "ph_phi", self.photon_max),
+            ]
+        )
+        features = pd.concat(parts, axis=1).reindex(columns=self.feature_names(), fill_value=0.0)
+        return features.replace([np.inf, -np.inf], np.nan)
+
+    @staticmethod
+    def _scalar(df: pd.DataFrame, column: str) -> np.ndarray:
+        if column not in df.columns:
+            return np.zeros(len(df), dtype=np.float32)
+        return pd.to_numeric(df[column], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+
+    @staticmethod
+    def _jagged(df: pd.DataFrame, source: str, target: str, max_len: int) -> pd.DataFrame:
+        values = (
+            df[source]
+            if source in df.columns
+            else pd.Series([[] for _ in range(len(df))], index=df.index)
+        )
+        return pd.DataFrame(
+            pad_jagged(values, max_len),
+            columns=[f"{target}_{idx}" for idx in range(max_len)],
+            index=df.index,
+        )
+
+    @staticmethod
+    def _split_leptons(df: pd.DataFrame, particle_code: int) -> dict[str, list[list[float]]]:
+        out = {key: [] for key in ("pt", "eta", "phi", "charge")}
+        for _, row in df.iterrows():
+            lep_type = _safe_sequence(row["lep_type"]) if "lep_type" in row.index else []
+            values = {
+                "pt": _safe_sequence(row["lep_pt"]) if "lep_pt" in row.index else [],
+                "eta": _safe_sequence(row["lep_eta"]) if "lep_eta" in row.index else [],
+                "phi": _safe_sequence(row["lep_phi"]) if "lep_phi" in row.index else [],
+                "charge": (
+                    _safe_sequence(row["lep_charge"]) if "lep_charge" in row.index else []
+                ),
+            }
+            selected = {key: [] for key in out}
+            for idx, type_value in enumerate(lep_type):
+                if abs(int(round(type_value))) != particle_code:
+                    continue
+                for key, sequence in values.items():
+                    selected[key].append(_value_at(sequence, idx))
+            for key in out:
+                out[key].append(selected[key])
+        return out
 
 
 @dataclass(frozen=True)
@@ -434,8 +534,8 @@ class _GamGamFileTask:
     random_state: int
     tree_name: str
     columns: list[str]
-    flat_builder: AtlasFeatureBuilder
-    graph_builder: GamGamGraphBuilder
+    flat_builder: GamGamCPFeatureBuilder
+    graph_builder: GamGamGraphBuilder | None
 
 
 @dataclass(frozen=True)
@@ -443,7 +543,7 @@ class _GamGamFileResult:
     label: int
     filename: str
     features: pd.DataFrame
-    graph: EventGraphDataset
+    graph: EventGraphDataset | None
 
 
 def _load_gamgam_file_task(task: _GamGamFileTask) -> _GamGamFileResult:
@@ -456,9 +556,13 @@ def _load_gamgam_file_task(task: _GamGamFileTask) -> _GamGamFileResult:
         columns=task.columns,
     )
     features = task.flat_builder.build(df)
-    graph = task.graph_builder.build(
-        df,
-        progress_label=f"{task.mode_name}/{task.filename} graph",
+    graph = (
+        None
+        if task.graph_builder is None
+        else task.graph_builder.build(
+            df,
+            progress_label=f"{task.mode_name}/{task.filename} graph",
+        )
     )
     print(f"Prepared {len(df)} {task.mode_name} events from {task.filename}", flush=True)
     return _GamGamFileResult(
@@ -474,6 +578,7 @@ def build_gamgam_dataset(
     random_state: int,
     transfer_config: Any,
     cache_dir: Path | None,
+    build_graphs: bool = True,
 ) -> DatasetBundle:
     modes = [
         GamGamMode(
@@ -493,4 +598,5 @@ def build_gamgam_dataset(
         random_state=random_state,
         tree_name=transfer_config.tree_name,
         cache_dir=resolved_cache_dir,
+        build_graphs=build_graphs,
     ).build()

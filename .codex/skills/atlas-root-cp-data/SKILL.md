@@ -11,6 +11,7 @@ description: Use when changing ATLAS CP ROOT data loading, branch configuration,
 - Preprocessing helpers: `src/tabpfn_feature_encoder/data/preprocessing.py`.
 - Config section: `dataset` in `configs/cp_encoder.yaml`.
 - All rows from every configured ROOT file are used. Do not reintroduce `events_per_class` sampling unless explicitly requested.
+- Default source training uses 12 classes and intentionally excludes `ttH_NLO.root` and `ttH_CPodd.root` for CP even/odd generalization.
 - Current split is stratified 50/25/25 train/validation/test.
 - Test is held out and not used during training.
 
@@ -52,4 +53,3 @@ For data changes, update or run:
 ```bash
 conda run -n tabpfn pytest -q tests/test_atlas_features.py tests/test_preprocessing.py tests/test_config.py
 ```
-

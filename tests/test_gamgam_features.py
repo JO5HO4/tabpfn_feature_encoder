@@ -1,7 +1,39 @@
 import numpy as np
 import pandas as pd
 
-from tabpfn_feature_encoder.data.gamgam_root import GamGamGraphBuilder
+from tabpfn_feature_encoder.data.gamgam_root import GamGamCPFeatureBuilder, GamGamGraphBuilder
+
+
+def test_gamgam_cp_feature_builder_matches_cp_flat_schema() -> None:
+    df = pd.DataFrame(
+        {
+            "met_et": [100.0],
+            "met_phi": [0.5],
+            "jet_pt": [[40.0]],
+            "jet_eta": [[0.1]],
+            "jet_phi": [[0.0]],
+            "jet_MV2c10": [[0.8]],
+            "photon_pt": [[50.0, 45.0, 35.0]],
+            "photon_eta": [[0.3, -0.4, 0.2]],
+            "photon_phi": [[2.0, -2.0, 1.0]],
+            "lep_pt": [[25.0, 20.0]],
+            "lep_eta": [[1.0, -1.0]],
+            "lep_phi": [[0.2, -0.2]],
+            "lep_charge": [[-1.0, 1.0]],
+            "lep_type": [[11.0, 13.0]],
+        }
+    )
+
+    features = GamGamCPFeatureBuilder().build(df)
+
+    assert features.shape == (1, 72)
+    assert list(features.columns) == GamGamCPFeatureBuilder().feature_names()
+    assert features.loc[0, "MET_met"] == 100.0
+    assert features.loc[0, "jet_btag_0"] == 0.8
+    assert features.loc[0, "ele_pt_0"] == 25.0
+    assert features.loc[0, "mu_pt_0"] == 20.0
+    assert features.loc[0, "ph_pt_0"] == 50.0
+    assert features.loc[0, "ph_pt_1"] == 45.0
 
 
 def test_gamgam_graph_builder_splits_leptons_and_uses_all_particles() -> None:

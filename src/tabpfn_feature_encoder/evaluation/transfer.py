@@ -5,47 +5,31 @@ from typing import Any
 
 import numpy as np
 
-from tabpfn_feature_encoder.data.graphs import EventGraphDataset, GraphStandardizer
+from tabpfn_feature_encoder.data.base import DatasetBundle
+from tabpfn_feature_encoder.data.graphs import EventGraphDataset
 from tabpfn_feature_encoder.data.preprocessing import Standardizer, stratified_sample_indices
 from tabpfn_feature_encoder.evaluation.metrics import accuracy, log_loss, roc_auc
 from tabpfn_feature_encoder.models.encoders import require_torch
 from tabpfn_feature_encoder.models.tabpfn_adapter import TabPFNPromptAdapter
-from tabpfn_feature_encoder.training.trainer import EncoderTabPFNClassifier
-from tabpfn_feature_encoder.utils.io import load_pickle, save_json
+from tabpfn_feature_encoder.training.encoder_classifier import EncoderOnlyClassifier
+from tabpfn_feature_encoder.utils.io import save_json
 
 
-def run_gnn_transfer_evaluation(
+def run_encoder_transfer_evaluation(
     *,
-    encoder_model_path: str | Path,
-    dataset: Any,
+    trained: EncoderOnlyClassifier,
+    dataset: DatasetBundle,
     output_dir: str | Path,
     context_size: int,
     query_chunk_size: int,
     device: str,
     random_state: int,
+    name: str,
 ) -> dict[str, Any]:
-    if dataset.graph_train is None or dataset.graph_test is None:
-        raise RuntimeError("Transfer evaluation requires graph_train and graph_test.")
+    """Evaluate a frozen supervised encoder on a downstream TabPFN task."""
 
-    trained = load_pickle(encoder_model_path)
-    if not isinstance(trained, EncoderTabPFNClassifier):
-        raise TypeError("encoder_model must be a saved EncoderTabPFNClassifier.")
-    if trained.encoder_model_ is None:
-        raise RuntimeError("Saved model does not contain an encoder_model_.")
-    if getattr(trained.encoder_model_, "encoder_type", None) != "gnn":
-        raise TypeError("Transfer evaluation currently expects a saved GNN encoder.")
-
-    torch_mod, _ = require_torch()
     effective_device = _effective_device(device)
-    encoder = trained.encoder_model_.to(effective_device)
-    encoder.eval()
-    for param in encoder.parameters():
-        param.requires_grad = False
-
-    graph_standardizer = trained.graph_standardizer_
-    if not isinstance(graph_standardizer, GraphStandardizer):
-        raise TypeError("Saved model does not contain a graph standardizer.")
-
+    _move_encoder(trained, effective_device)
     y_train = np.asarray(dataset.y_train, dtype=np.int64)
     y_test = np.asarray(dataset.y_test, dtype=np.int64)
     context_idx = stratified_sample_indices(
@@ -54,19 +38,19 @@ def run_gnn_transfer_evaluation(
         random_state=random_state + 30_000,
     )
 
-    graph_train = graph_standardizer.transform(dataset.graph_train)
-    graph_test = graph_standardizer.transform(dataset.graph_test)
-    encoded_context = encode_graph_dataset(
-        encoder=encoder,
-        dataset=graph_train.subset(context_idx),
+    encoded_context = _encode_subset(
+        trained=trained,
+        dataset=dataset,
+        split="train",
+        indices=context_idx,
         batch_size=query_chunk_size,
-        device=effective_device,
     )
-    encoded_test = encode_graph_dataset(
-        encoder=encoder,
-        dataset=graph_test,
+    encoded_test = _encode_subset(
+        trained=trained,
+        dataset=dataset,
+        split="test",
+        indices=None,
         batch_size=query_chunk_size,
-        device=effective_device,
     )
     encoded_proba = _tabpfn_predict_proba(
         X_context=encoded_context,
@@ -89,29 +73,12 @@ def run_gnn_transfer_evaluation(
     )
     baseline_metrics = _classification_metrics(y_test, baseline_proba)
 
-    combined_context = np.concatenate([encoded_context, flat_train[context_idx]], axis=1)
-    combined_test = np.concatenate([encoded_test, flat_test], axis=1)
-    combined_proba = _tabpfn_predict_proba(
-        X_context=combined_context,
-        y_context=y_train[context_idx],
-        X_query=combined_test,
-        query_chunk_size=query_chunk_size,
-        device=effective_device,
-    )
-    combined_metrics = _classification_metrics(y_test, combined_proba)
-
     out = {
-        "frozen_gnn_tabpfn": encoded_metrics,
-        "frozen_gnn_plus_flat_tabpfn": combined_metrics,
+        "frozen_encoder_tabpfn": encoded_metrics,
         "baseline_tabpfn": baseline_metrics,
         "delta": {
             key: encoded_metrics[key] - baseline_metrics[key]
             for key in encoded_metrics
-            if key in baseline_metrics
-        },
-        "plus_flat_delta": {
-            key: combined_metrics[key] - baseline_metrics[key]
-            for key in combined_metrics
             if key in baseline_metrics
         },
         "context_size": int(len(context_idx)),
@@ -121,35 +88,54 @@ def run_gnn_transfer_evaluation(
         "n_test": int(len(y_test)),
         "n_flat_features": int(dataset.X_train.shape[1]),
         "n_encoded_features": int(encoded_context.shape[1]),
-        "n_combined_features": int(combined_context.shape[1]),
+        "source_encoder_classes": (
+            None if trained.classes_ is None else [int(label) for label in trained.classes_]
+        ),
+        "task_name": name,
     }
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    save_json(out, output_path / "transfer_metrics.json")
-    np.save(output_path / "frozen_gnn_test_proba.npy", encoded_proba)
-    np.save(output_path / "frozen_gnn_plus_flat_test_proba.npy", combined_proba)
-    np.save(output_path / "baseline_test_proba.npy", baseline_proba)
-    torch_mod.cuda.empty_cache() if str(effective_device).startswith("cuda") else None
+    save_json(out, output_path / f"{name}_metrics.json")
+    np.save(output_path / f"{name}_frozen_encoder_proba.npy", encoded_proba)
+    np.save(output_path / f"{name}_baseline_proba.npy", baseline_proba)
+    if str(effective_device).startswith("cuda"):
+        torch_mod, _ = require_torch()
+        if torch_mod.cuda.is_available():
+            torch_mod.cuda.empty_cache()
     return out
 
 
-def encode_graph_dataset(
+def print_transfer_summary(name: str, metrics: dict[str, Any]) -> None:
+    for family in ("baseline_tabpfn", "frozen_encoder_tabpfn", "delta"):
+        values = metrics[family]
+        text = ", ".join(f"{key}={value:.3f}" for key, value in values.items())
+        print(f"{name} {family}: {text}")
+
+
+def _encode_subset(
     *,
-    encoder: Any,
-    dataset: EventGraphDataset,
+    trained: EncoderOnlyClassifier,
+    dataset: DatasetBundle,
+    split: str,
+    indices: np.ndarray | None,
     batch_size: int,
-    device: str,
 ) -> np.ndarray:
-    torch_mod, _ = require_torch()
-    parts: list[np.ndarray] = []
-    with torch_mod.no_grad():
-        for start in range(0, len(dataset), int(batch_size)):
-            stop = min(start + int(batch_size), len(dataset))
-            batch = dataset.to_batch(np.arange(start, stop, dtype=np.int64), device=device)
-            parts.append(encoder(batch).detach().cpu().numpy())
-    if not parts:
-        return np.zeros((0, int(encoder.output_dim)), dtype=np.float32)
-    return np.concatenate(parts, axis=0).astype(np.float32)
+    if trained.is_graph_input_:
+        graph_dataset = getattr(dataset, f"graph_{split}")
+        if not isinstance(graph_dataset, EventGraphDataset):
+            raise RuntimeError("Frozen graph encoder requires graph downstream features.")
+        X = graph_dataset if indices is None else graph_dataset.subset(indices)
+    else:
+        X_df = getattr(dataset, f"X_{split}")
+        X = X_df if indices is None else X_df.iloc[indices]
+    return trained.encode(X, batch_size=batch_size)
+
+
+def _move_encoder(trained: EncoderOnlyClassifier, device: str) -> None:
+    if trained.encoder_model_ is not None:
+        trained.encoder_model_.to(device)
+    if trained.classifier_head_ is not None:
+        trained.classifier_head_.to(device)
 
 
 def _tabpfn_predict_proba(

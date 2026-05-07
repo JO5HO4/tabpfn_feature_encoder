@@ -8,7 +8,7 @@ description: Use when running, configuring, validating, or documenting the tabpf
 ## Repo Basics
 
 - Repo root: `tabpfn-feature-encoder`.
-- Main CP residual config: `configs/cp_encoder.yaml`.
+- Main 12-class source residual config: `configs/cp_encoder.yaml`.
 - Particle GNN config: `configs/cp_gnn.yaml`.
 - Particle transformer config: `configs/cp_transformer.yaml`.
 - Launcher: `bash scripts/run_cp_encoder.sh`.
@@ -58,13 +58,15 @@ find src -maxdepth 2 -type d -name '*.egg-info' -prune -exec rm -rf {} +
 Training saves:
 
 - `metrics.json`
-- `benchmark_metrics.json`
 - `training_summary.json`
 - `epoch_metrics.csv`
-- `encoder_tabpfn.pkl`
+- `encoder_classifier.pkl`
 - `run_metadata.json`
-- `benchmark_baseline_tabpfn_proba.npy`
-- `benchmark_encoder_tabpfn_proba.npy`
-- `benchmark_encoder_only_proba.npy`
+- `cp_generalization/cp_even_odd_generalization_metrics.json`
+- `cp_generalization/cp_even_odd_generalization_baseline_proba.npy`
+- `cp_generalization/cp_even_odd_generalization_frozen_encoder_proba.npy`
+- `open_data_generalization_metrics.json` in `transfer.output_dir`
+- `open_data_generalization_baseline_proba.npy` in `transfer.output_dir`
+- `open_data_generalization_frozen_encoder_proba.npy` in `transfer.output_dir`
 
 Terminal metrics print to three decimals; CSV/JSON keep full precision.

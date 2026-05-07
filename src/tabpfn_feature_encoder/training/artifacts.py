@@ -12,7 +12,7 @@ def save_training_artifacts(
     metrics: dict[str, Any],
     training_summary: dict[str, Any],
     model: Any | None = None,
-    model_artifact: str = "encoder_tabpfn.pkl",
+    model_artifact: str = "encoder_classifier.pkl",
     save_model: bool = True,
     save_metrics: bool = True,
 ) -> dict[str, Path]:

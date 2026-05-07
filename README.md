@@ -2,9 +2,9 @@
 
 Minimal training repo for learning a small feature encoder in front of TabPFN.
 
-The current goal is deliberately narrow: use all configured ROOT events, train a
-small encoder on support/query episodes, and feed the encoded event features into
-a frozen TabPFN classifier.
+The current goal is deliberately narrow: pretrain a small encoder on a 12-class
+ATLAS source task, then freeze that encoder and test whether it helps TabPFN on
+held-out downstream tasks.
 
 ## Current Design
 
@@ -12,10 +12,10 @@ a frozen TabPFN classifier.
 2. Build flat tabular features for the MLP-style encoders, or variable-particle event graphs for the GNN/transformer encoders.
 3. Split the full dataset into train/validation/test with a 50/25/25 stratified split.
 4. Standardize features using train-set statistics only.
-5. Train on batches from the train split. Each batch is split 50/50 into support and query.
-6. Fit TabPFN on the encoded support features and compute loss on the encoded query features.
-7. At the end of each epoch, evaluate with a fixed validation context and the remaining validation events as query.
-8. Hold out the test split during training, then use it only for final benchmark metrics.
+5. Train the encoder with a direct supervised multiclass head on 12 source labels.
+6. Keep TabPFN out of source training, which avoids the default 10-class TabPFN limit.
+7. Restore the best validation-AUC encoder and report source test metrics.
+8. Freeze the encoder and run TabPFN generalization tests on held-out CP even/odd and open data.
 
 ## Encoder Choice
 
@@ -114,7 +114,7 @@ PY
 The main config is [configs/cp_encoder.yaml](configs/cp_encoder.yaml).
 
 ```yaml
-output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/cp_encoder_residual
+output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_multiclass_residual
 cache_dir: /pscratch/sd/j/joshuaho/tabpfn
 seed: 42
 device: cuda
@@ -137,10 +137,18 @@ dataset:
   raw_dir: /global/cfs/projectdirs/atlas/joshua/gnn_data/stats_100K
   split: {train: 0.5, val: 0.25, test: 0.25}
   labels:
-    - label: 0
-      files: [ttH_NLO.root]
-    - label: 1
-      files: [ttH_CPodd.root]
+    - {label: 0, files: [SingleT_schan.root]}
+    - {label: 1, files: [VBF_NLO_inc.root]}
+    - {label: 2, files: [WH_NLO_inc.root]}
+    - {label: 3, files: [ZH_NLO_inc.root]}
+    - {label: 4, files: [ggF_NLO_inc.root]}
+    - {label: 5, files: [tHjb_NLO_inc.root]}
+    - {label: 6, files: [ttH_NLO_inc.root]}
+    - {label: 7, files: [ttW.root]}
+    - {label: 8, files: [ttbar.root]}
+    - {label: 9, files: [ttt.root]}
+    - {label: 10, files: [tttt.root]}
+    - {label: 11, files: [ttyy.root]}
   padding: zero
   scalars: [MET_met, MET_phi]
   particles:
@@ -172,17 +180,18 @@ transfer:
     - {label: 4, name: ZH, files: [mc_345319.ZH125J_Zincl_gamgam.GamGam.root]}
 ```
 
-Every row from every configured file is used. With the current two 100K ROOT
-files, this means:
+Every row from every configured source file is used. The default source task uses
+the 12 non-CP-held-out ROOT files in `stats_100K`. `ttH_NLO.root` and
+`ttH_CPodd.root` are intentionally excluded from source training and used for the
+CP even/odd generalization test.
 
 ```text
-total: 200000
-train: 100000
-validation: 50000
-test: 50000
+classes: 12
+split: 50/25/25 stratified train/validation/test
 ```
 
-With `batch_size: 2048` and `support_query_ratio: 0.5`, each training step uses:
+With `batch_size: 2048`, the source classifier updates on 2048 training events
+per optimizer step. For downstream TabPFN tests, `support_query_ratio: 0.5` gives:
 
 ```text
 support: 1024
@@ -274,37 +283,37 @@ Equivalent direct CLI:
 tabpfn-encoder-train train --config configs/cp_encoder.yaml
 ```
 
-## Nominal Benchmark
+## Source Training
 
-Each training run now finishes with held-out test metrics for three comparisons
-on the same 50/25/25 split:
+The default `train` command trains only the encoder plus a linear classification
+head on the 12-class source task. Labels are mapped internally to contiguous
+classifier indices, so this path bypasses TabPFN's default 10-class limit. The
+saved encoder checkpoint keeps the source label scheme in `training_summary.json`.
 
-1. `baseline_tabpfn`: TabPFN on the standardized flat ROOT features.
-2. `encoder_tabpfn`: the trained encoder output sent into TabPFN.
-3. `encoder_only_classifier`: the same encoder architecture and hyperparameters
-   trained directly with a linear classifier head, without TabPFN.
+After source training, the run freezes the encoder and evaluates CP even/odd and
+open-data generalization with TabPFN:
 
-The two TabPFN comparisons use the same stratified train-context sample. By
-default, that context is the support side of one training batch, so
-`batch_size: 2048` and `support_query_ratio: 0.5` gives a 1024-event context and
-1024-event test query chunks.
+1. `baseline_tabpfn`: TabPFN on the held-out CP flat features.
+2. `frozen_encoder_tabpfn`: frozen source encoder output sent into TabPFN.
+3. `delta`: frozen encoder metrics minus baseline metrics.
 
 ## Transfer Evaluation
 
-The transfer workflow freezes the CP-trained GNN encoder and evaluates whether
-its 128D event embedding helps a new 5-class Higgs production-mode task:
+The default `train` command runs the 5-class ATLAS open-data Higgs
+production-mode task after CP even/odd. The separate `transfer` command reruns
+that same open-data comparison from a saved checkpoint:
 
 ```text
 ttH vs ggF vs VBF vs WH vs ZH
 ```
 
-It compares three TabPFN evaluations on the same GamGam train/test split:
+It compares two TabPFN evaluations on the same GamGam train/test split:
 
-1. `frozen_gnn_tabpfn`: CP-trained GNN encoder is frozen, GamGam events are encoded, then TabPFN is fit on encoded context events.
-2. `frozen_gnn_plus_flat_tabpfn`: the frozen GNN embedding is concatenated with standardized flat features.
-3. `baseline_tabpfn`: TabPFN is fit directly on padded flat GamGam features.
+1. `frozen_encoder_tabpfn`: source-trained encoder is frozen, open-data events are encoded, then TabPFN is fit on encoded context events.
+2. `baseline_tabpfn`: TabPFN is fit directly on CP-compatible flat open-data features.
 
-Run it after training the CP encoder:
+Run the standalone transfer command after training the source encoder when you
+want to rerun only the open-data comparison:
 
 ```bash
 bash scripts/run_gamgam_transfer.sh
@@ -321,16 +330,15 @@ To evaluate a specific saved encoder:
 ```bash
 tabpfn-encoder-train transfer \
   --config configs/cp_encoder.yaml \
-  --model /path/to/encoder_best_val_auc.pkl
+  --model /path/to/encoder_classifier.pkl
 ```
 
 Transfer outputs are written to `transfer.output_dir`:
 
 ```text
-transfer_metrics.json
-frozen_gnn_test_proba.npy
-frozen_gnn_plus_flat_test_proba.npy
-baseline_test_proba.npy
+open_data_generalization_metrics.json
+open_data_generalization_frozen_encoder_proba.npy
+open_data_generalization_baseline_proba.npy
 ```
 
 ## Expected Logs
@@ -340,29 +348,22 @@ A run should look like:
 ```text
 Using TabPFN model: ...
 Loading cached dataset: ...
-EncoderTabPFN settings: type=residual_mlp, device=cuda, layers=4, hidden_dim=64, output_dim=72, batch_size=2048, support_query_ratio=0.5, identity_residual=True, residual_scale=0.1, identity_weight=0.0, grad_clip_norm=0.1, early_stopping_patience=8
-initial val: context=1024, query=48976, val_log_loss=..., val_accuracy=..., val_roc_auc=..., val_p1_mean=..., val_p1_std=...
-epoch 1/20: train_loss=..., train_accuracy=..., train_roc_auc=..., batches=49/49
-epoch 1/20 val: context=1024, query=48976, val_log_loss=..., val_accuracy=..., val_roc_auc=..., val_p1_mean=..., val_p1_std=...
-restored best encoder after epoch 1 (best_val_roc_auc=...)
-early stopping: no validation AUC improvement for 8 epochs
 Encoder-only classifier settings: type=residual_mlp, device=cuda, layers=4, hidden_dim=64, output_dim=72, batch_size=2048
 encoder_only epoch 1/20: train_loss=..., train_accuracy=..., train_roc_auc=..., batches=49/49, val_loss=..., val_accuracy=..., val_roc_auc=...
-Nominal benchmark test metrics:
-baseline_tabpfn: test_accuracy=..., test_roc_auc=..., test_log_loss=...
-encoder_tabpfn: test_accuracy=..., test_roc_auc=..., test_log_loss=...
-encoder_only_classifier: test_accuracy=..., test_roc_auc=..., test_log_loss=...
-benchmark setup: context=1024, query_chunk=1024, test=50000
+source_12_class val: accuracy=..., log_loss=..., roc_auc=...
+source_12_class test: accuracy=..., log_loss=..., roc_auc=...
+cp_even_odd_generalization baseline_tabpfn: accuracy=..., log_loss=..., roc_auc=...
+cp_even_odd_generalization frozen_encoder_tabpfn: accuracy=..., log_loss=..., roc_auc=...
+cp_even_odd_generalization delta: accuracy=..., log_loss=..., roc_auc=...
+open_data_generalization baseline_tabpfn: accuracy=..., log_loss=..., roc_auc=...
+open_data_generalization frozen_encoder_tabpfn: accuracy=..., log_loss=..., roc_auc=...
+open_data_generalization delta: accuracy=..., log_loss=..., roc_auc=...
 ```
 
 Metrics are printed to three decimal places in the terminal. Saved CSV/JSON files
 keep full precision.
 
-Earlier CP-only GNN checkpoints reached validation AUC around `0.66`, but their
-frozen embeddings underperformed flat TabPFN on GamGam transfer. The current
-default is therefore the more conservative residual flat encoder; use
-`configs/cp_gnn.yaml` or `configs/cp_transformer.yaml` for graph experiments.
-
+Use `configs/cp_gnn.yaml` or `configs/cp_transformer.yaml` for graph experiments.
 For transformer runs, the settings line also prints `attention_heads`.
 
 ## Outputs
@@ -374,25 +375,30 @@ run_metadata.json
 metrics.json
 training_summary.json
 epoch_metrics.csv
-encoder_tabpfn.pkl
-encoder_best_val_auc.pkl
+encoder_classifier.pkl
 best_checkpoint.json
-benchmark_metrics.json
-benchmark_baseline_tabpfn_proba.npy
-benchmark_encoder_tabpfn_proba.npy
-benchmark_encoder_only_proba.npy
+cp_generalization/cp_even_odd_generalization_metrics.json
+cp_generalization/cp_even_odd_generalization_baseline_proba.npy
+cp_generalization/cp_even_odd_generalization_frozen_encoder_proba.npy
+```
+
+Open-data generalization artifacts are written to `transfer.output_dir`:
+
+```text
+open_data_generalization_metrics.json
+open_data_generalization_baseline_proba.npy
+open_data_generalization_frozen_encoder_proba.npy
 ```
 
 `epoch_metrics.csv` is the easiest file to inspect during development. It contains
 one row per epoch with train loss/accuracy/AUC and validation loss/accuracy/AUC.
-`benchmark_metrics.json` is the final test comparison table and should be the
-primary file for reporting nominal CP performance.
-The saved `encoder_best_val_auc.pkl` is the checkpoint to load for transfer: it
-contains the epoch with the highest validation AUC. `encoder_tabpfn.pkl` is kept
-as the default final model artifact and is also restored to the best validation
-state. Both saved models keep the trained encoder and preprocessing state on CPU
-so they can be reused without a GPU session. If `device: cuda` is set on a
-machine without CUDA, the trainer automatically falls back to CPU.
+`metrics.json` contains source validation/test metrics plus CP even/odd and
+open-data generalization summaries. `encoder_classifier.pkl` is the checkpoint
+to load for standalone transfer reruns. It keeps the trained encoder,
+classifier head, label scheme, and preprocessing state on CPU so it can be
+reused without a GPU session. If
+`device: cuda` is set on a machine without CUDA, the trainer automatically falls
+back to CPU.
 
 ## Memory Notes
 

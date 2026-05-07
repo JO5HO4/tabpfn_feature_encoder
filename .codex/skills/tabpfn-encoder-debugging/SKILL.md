@@ -1,13 +1,16 @@
 ---
 name: tabpfn-encoder-debugging
-description: Use when debugging TabPFN encoder training quality, validation AUC, probability collapse, CUDA out-of-memory, checkpoint/model-cache issues, or support/query episode behavior in tabpfn-feature-encoder.
+description: Use when debugging TabPFN encoder training quality, validation AUC, probability collapse, CUDA out-of-memory, checkpoint/model-cache issues, or downstream context/query behavior in tabpfn-feature-encoder.
 ---
 
 # TabPFN Encoder Debugging
 
 ## Key Known Behavior
 
-Raw standardized features give a useful TabPFN baseline. A random encoder can destroy that signal, so the current encoder starts as identity residual when `output_dim == input_dim`:
+The source encoder is trained with a direct multiclass classifier head, not with
+TabPFN. This bypasses TabPFN's default 10-class limit for the 12-class source
+task. Raw standardized features still give a useful downstream TabPFN baseline,
+so the default encoder starts as identity residual when `output_dim == input_dim`:
 
 ```text
 encoder(x) = x + 0.1 * residual_mlp(x)
@@ -17,27 +20,25 @@ For the current config, `output_dim: 72` matches the feature count.
 
 ## Training And Validation Protocol
 
-- Train batches are split by `support_query_ratio`.
-- Current `batch_size: 2048` means `1024` support and `1024` query.
-- Validation uses a fixed validation context and scores the remaining validation rows as query.
-- `initial val` is computed before optimizer updates; it should be close to the raw TabPFN baseline.
+- Source training uses `batch_size: 2048` supervised multiclass batches.
+- Validation uses the source validation split for early stopping.
+- CP even/odd and open-data generalization use TabPFN after source training.
+- Downstream context size is `batch_size * support_query_ratio`, currently 1024.
 
 ## Collapse Signals
 
-If validation reports `val_roc_auc=0.500` and `val_p1_std=0.000`, TabPFN probabilities have collapsed to nearly constant 0.5.
+If downstream generalization reports `roc_auc=0.500` and near-constant
+probabilities, TabPFN probabilities have collapsed to nearly constant 0.5.
 
 First checks:
 
-- Compare `initial val` to `epoch 1 val`.
-- Confirm `identity_residual=True` and `residual_scale=0.1`.
-- Confirm `encoder.output_dim` equals actual feature count.
-- Inspect `epoch_metrics.csv` for `val_p1_std`.
+- Confirm `encoder.type: residual_mlp`, `residual_scale=0.1`, and `encoder.output_dim` equals actual feature count.
+- Inspect `cp_generalization/*_proba.npy` or transfer probability outputs.
 
 The trainer currently stabilizes updates with:
 
 - identity residual initialization
 - residual scale `0.1`
-- support prompt detached in `_episode_step`
 - gradient clipping at `max_norm=0.1`
 
 ## CUDA OOM

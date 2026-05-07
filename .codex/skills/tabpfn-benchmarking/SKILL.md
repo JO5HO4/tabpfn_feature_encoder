@@ -1,28 +1,31 @@
 ---
 name: tabpfn-benchmarking
-description: Use when adding, reviewing, or interpreting nominal benchmark results for tabpfn-feature-encoder, especially baseline TabPFN, Encoder+TabPFN, and encoder-only classifier test AUC/accuracy comparisons on the same train/val/test split.
+description: Use when adding, reviewing, or interpreting benchmark/generalization results for tabpfn-feature-encoder, especially source 12-class encoder training, CP even/odd frozen-encoder transfer, and open-data transfer metrics.
 ---
 
 # TabPFN Benchmarking
 
-## Nominal Comparison
+## Current Comparison
 
-Every default CP training run should produce final test metrics for three models
-using the existing dataset split:
+Every default run trains the encoder on the 12-class source task without TabPFN,
+then freezes it for downstream TabPFN tests.
 
-1. `baseline_tabpfn`: TabPFN on standardized flat features.
-2. `encoder_tabpfn`: the trained feature encoder followed by TabPFN.
-3. `encoder_only_classifier`: a supervised classifier using the same encoder
-   architecture and encoder hyperparameters, with a linear classification head.
+Source metrics:
 
-The final comparison is always based on the held-out test split. Validation is
-only for model selection and early stopping.
+- `source_val_*`
+- `source_test_*`
+
+Generalization metrics:
+
+1. `baseline_tabpfn`: TabPFN on downstream flat features.
+2. `frozen_encoder_tabpfn`: frozen source encoder output followed by TabPFN.
+3. `delta`: frozen encoder minus baseline.
 
 ## Split And Context Rules
 
 - Do not create a new split inside benchmarking.
 - Use `DatasetBundle.y_train/y_val/y_test` and matching flat/graph inputs.
-- Baseline TabPFN and Encoder+TabPFN must use the same train-context indices.
+- Baseline TabPFN and frozen-encoder TabPFN must use the same train-context indices.
 - The default context size is `batch_size * support_query_ratio`.
 - Test rows are the query set; process them in chunks sized like the training
   query side of a batch.
@@ -31,17 +34,18 @@ only for model selection and early stopping.
 
 Benchmark outputs should include:
 
-- `benchmark_metrics.json`
-- `benchmark_baseline_tabpfn_proba.npy`
-- `benchmark_encoder_tabpfn_proba.npy`
-- `benchmark_encoder_only_proba.npy`
+- `metrics.json`
+- `cp_generalization/cp_even_odd_generalization_metrics.json`
+- `open_data_generalization_metrics.json` from default training or the transfer command
 
 Terminal output should report, at minimum:
 
 ```text
-baseline_tabpfn: test_accuracy=..., test_roc_auc=..., test_log_loss=...
-encoder_tabpfn: test_accuracy=..., test_roc_auc=..., test_log_loss=...
-encoder_only_classifier: test_accuracy=..., test_roc_auc=..., test_log_loss=...
+source_12_class test: accuracy=..., log_loss=..., roc_auc=...
+cp_even_odd_generalization baseline_tabpfn: accuracy=..., log_loss=..., roc_auc=...
+cp_even_odd_generalization frozen_encoder_tabpfn: accuracy=..., log_loss=..., roc_auc=...
+open_data_generalization baseline_tabpfn: accuracy=..., log_loss=..., roc_auc=...
+open_data_generalization frozen_encoder_tabpfn: accuracy=..., log_loss=..., roc_auc=...
 ```
 
 Saved JSON may keep full precision; terminal metrics should stay compact.

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
@@ -225,6 +225,38 @@ class EncoderOnlyClassifier:
             X_model = self.standardizer_.transform(to_numpy_matrix(X))
         return self.predict_proba_standardized(X_model)
 
+    def encode(self, X: Any, batch_size: int | None = None) -> np.ndarray:
+        if self.is_graph_input_:
+            if not isinstance(X, EventGraphDataset):
+                raise TypeError("This classifier was trained on graph inputs.")
+            X_model = self.graph_standardizer_.transform(X)
+        else:
+            X_model = self.standardizer_.transform(to_numpy_matrix(X))
+        return self.encode_standardized(X_model, batch_size=batch_size)
+
+    def encode_standardized(self, X_model: Any, batch_size: int | None = None) -> np.ndarray:
+        torch_mod, _ = require_torch()
+        if self.encoder_model_ is None:
+            raise RuntimeError("Classifier has not been fitted.")
+
+        device = self._effective_device()
+        self.encoder_model_.eval()
+        parts: list[np.ndarray] = []
+        effective_batch_size = max(1, int(batch_size or self.encoder.batch_size))
+        with torch_mod.no_grad():
+            for start in range(0, len(X_model), effective_batch_size):
+                idx = np.arange(
+                    start,
+                    min(start + effective_batch_size, len(X_model)),
+                    dtype=np.int64,
+                )
+                x_batch = self._model_input(X_model, idx, device)
+                parts.append(self.encoder_model_(x_batch).detach().cpu().numpy())
+        self._clear_cuda_cache(device)
+        if not parts:
+            return np.zeros((0, int(self.encoder.output_dim)), dtype=np.float32)
+        return np.concatenate(parts, axis=0).astype(np.float32)
+
     def evaluate(self, X: Any, y: Any) -> dict[str, float]:
         proba = self.predict_proba(X)
         return self.metrics_from_proba(y, proba)
@@ -232,6 +264,25 @@ class EncoderOnlyClassifier:
     def metrics_from_proba(self, y: Any, proba: np.ndarray) -> dict[str, float]:
         y_np = self._encode_labels(to_label_vector(y))
         return self._classification_metrics(y_np, proba)
+
+    def get_training_summary(self) -> dict[str, Any]:
+        return {
+            "encoder": asdict(self.encoder),
+            "classes": None if self.classes_ is None else self.classes_.tolist(),
+            "best_epoch": self.best_epoch_,
+            "latest_evaluation": self.latest_evaluation_,
+            "history": [asdict(record) for record in self.history_],
+            "training_target": "supervised_multiclass_encoder_classifier",
+            "tabpfn_used_for_training": False,
+        }
+
+    def prepare_for_serialization(self) -> EncoderOnlyClassifier:
+        if self.encoder_model_ is not None:
+            self.encoder_model_.to("cpu")
+        if self.classifier_head_ is not None:
+            self.classifier_head_.to("cpu")
+        self._clear_cuda_cache("cuda")
+        return self
 
     def evaluate_standardized(self, X_model: Any, y: Any) -> dict[str, float]:
         y_np = self._encode_labels(to_label_vector(y))
@@ -260,7 +311,14 @@ class EncoderOnlyClassifier:
     def _encode_labels(self, y: np.ndarray) -> np.ndarray:
         if self.classes_ is None:
             raise RuntimeError("Classifier classes are not initialized.")
-        return np.searchsorted(self.classes_, np.asarray(y, dtype=np.int64)).astype(np.int64)
+        labels = np.asarray(y, dtype=np.int64)
+        encoded = np.searchsorted(self.classes_, labels)
+        in_bounds = encoded < len(self.classes_)
+        valid = np.zeros(len(labels), dtype=bool)
+        valid[in_bounds] = self.classes_[encoded[in_bounds]] == labels[in_bounds]
+        if not np.all(valid):
+            raise ValueError("Labels contain values not seen during classifier training.")
+        return encoded.astype(np.int64)
 
     @staticmethod
     def _model_input(X: Any, indices: np.ndarray, device: str) -> Any:

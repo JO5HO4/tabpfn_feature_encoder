@@ -23,7 +23,7 @@ def save_binary_classification_plots(
     outputs: dict[str, np.ndarray],
     output_dir: str | Path,
     *,
-    prefix: str = "encoder_tabpfn",
+    prefix: str = "classifier",
 ) -> dict[str, Path]:
     try:
         import matplotlib

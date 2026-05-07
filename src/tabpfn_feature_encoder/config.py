@@ -19,7 +19,6 @@ class EncoderConfig:
     batch_size: int = 2048
     support_query_ratio: float = 0.5
     residual_scale: float = 0.1
-    identity_weight: float = 0.0
     grad_clip_norm: float = 0.1
     early_stopping_patience: int = 8
     min_delta: float = 0.001
@@ -29,7 +28,6 @@ class EncoderConfig:
         encoder_type = str(payload.get("type", payload.get("kind", "residual_mlp")))
         support_query_ratio = float(payload.get("support_query_ratio", 0.5))
         residual_scale = float(payload.get("residual_scale", 0.1))
-        identity_weight = float(payload.get("identity_weight", 0.0))
         grad_clip_norm = float(payload.get("grad_clip_norm", 0.1))
         early_stopping_patience = int(payload.get("early_stopping_patience", 8))
         min_delta = float(payload.get("min_delta", 0.001))
@@ -40,8 +38,6 @@ class EncoderConfig:
             raise ValueError("encoder.attention_heads must be positive.")
         if residual_scale < 0.0:
             raise ValueError("encoder.residual_scale must be non-negative.")
-        if identity_weight < 0.0:
-            raise ValueError("encoder.identity_weight must be non-negative.")
         if grad_clip_norm < 0.0:
             raise ValueError("encoder.grad_clip_norm must be non-negative.")
         if early_stopping_patience < 0:
@@ -59,7 +55,6 @@ class EncoderConfig:
             batch_size=int(payload.get("batch_size", 2048)),
             support_query_ratio=support_query_ratio,
             residual_scale=residual_scale,
-            identity_weight=identity_weight,
             grad_clip_norm=grad_clip_norm,
             early_stopping_patience=early_stopping_patience,
             min_delta=min_delta,

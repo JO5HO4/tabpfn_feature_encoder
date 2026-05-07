@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from tabpfn_feature_encoder.config import ProjectConfig
+from tabpfn_feature_encoder.config import ProjectConfig, load_project_config
 
 
 def test_project_config_from_dict() -> None:
@@ -38,7 +38,6 @@ def test_project_config_from_dict() -> None:
                 "batch_size": 2048,
                 "support_query_ratio": 0.5,
                 "residual_scale": 0.05,
-                "identity_weight": 3.0,
                 "grad_clip_norm": 0.2,
                 "early_stopping_patience": 4,
                 "min_delta": 0.002,
@@ -84,7 +83,6 @@ def test_project_config_from_dict() -> None:
     assert cfg.encoder.batch_size == 2048
     assert cfg.encoder.support_query_ratio == 0.5
     assert cfg.encoder.residual_scale == 0.05
-    assert cfg.encoder.identity_weight == 3.0
     assert cfg.encoder.grad_clip_norm == 0.2
     assert cfg.encoder.early_stopping_patience == 4
     assert cfg.encoder.min_delta == 0.002
@@ -109,8 +107,21 @@ def test_encoder_defaults_match_main_training_config() -> None:
     assert cfg.encoder.output_dim == 72
     assert cfg.encoder.learning_rate == 5e-5
     assert cfg.encoder.batch_size == 2048
-    assert cfg.encoder.identity_weight == 0.0
     assert cfg.encoder.early_stopping_patience == 8
     assert cfg.encoder.min_delta == 0.001
     assert cfg.transfer.context_size == 1024
     assert cfg.transfer.query_chunk_size == 1024
+
+
+def test_main_config_uses_12_class_source_task_and_holds_out_cp_files() -> None:
+    cfg = load_project_config(Path("configs/cp_encoder.yaml"))
+    configured_files = {
+        filename
+        for label_config in cfg.dataset.labels
+        for filename in label_config.files
+    }
+
+    assert len(cfg.dataset.labels) == 12
+    assert "ttH_NLO.root" not in configured_files
+    assert "ttH_CPodd.root" not in configured_files
+    assert cfg.encoder.type == "residual_mlp"

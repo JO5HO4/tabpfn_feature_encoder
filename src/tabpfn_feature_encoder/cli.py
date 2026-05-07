@@ -1,33 +1,33 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
-from tabpfn_feature_encoder.config import load_project_config
+from tabpfn_feature_encoder.config import DatasetConfig, LabelFileConfig, load_project_config
 from tabpfn_feature_encoder.data.atlas_root import build_default_cp_dataset
 from tabpfn_feature_encoder.data.gamgam_root import build_gamgam_dataset
-from tabpfn_feature_encoder.evaluation.benchmark import (
-    print_benchmark_summary,
-    run_nominal_benchmarks,
+from tabpfn_feature_encoder.evaluation.transfer import (
+    print_transfer_summary,
+    run_encoder_transfer_evaluation,
 )
-from tabpfn_feature_encoder.evaluation.transfer import run_gnn_transfer_evaluation
 from tabpfn_feature_encoder.training.artifacts import save_training_artifacts
-from tabpfn_feature_encoder.training.trainer import EncoderTabPFNClassifier
-from tabpfn_feature_encoder.utils.io import save_json, save_pickle
+from tabpfn_feature_encoder.training.encoder_classifier import EncoderOnlyClassifier
+from tabpfn_feature_encoder.utils.io import load_pickle, save_json, save_pickle
 from tabpfn_feature_encoder.utils.seed import set_global_seed
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train a simple TabPFN feature encoder.")
+    parser = argparse.ArgumentParser(description="Train and evaluate a TabPFN feature encoder.")
     subparsers = parser.add_subparsers(dest="command", required=True)
     train = subparsers.add_parser("train", help="Run encoder training from a YAML config.")
     train.add_argument("--config", required=True, help="Path to YAML config.")
     transfer = subparsers.add_parser(
         "transfer",
-        help="Evaluate a frozen CP-trained GNN encoder on GamGam production modes.",
+        help="Evaluate a frozen source-trained encoder on GamGam production modes.",
     )
     transfer.add_argument("--config", required=True, help="Path to YAML config.")
     transfer.add_argument(
@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path to saved encoder checkpoint. Defaults to transfer.encoder_model, "
-            "then output_dir/encoder_best_val_auc.pkl, then output_dir/encoder_tabpfn.pkl."
+            "then output_dir/encoder_classifier.pkl."
         ),
     )
     return parser
@@ -77,7 +77,7 @@ def run_train(config_path: Path) -> None:
     X_val = dataset.graph_val if use_graph_encoder else dataset.X_val
     if X_train is None or X_val is None:
         raise RuntimeError("Graph encoder requested, but graph dataset was not built.")
-    model = EncoderTabPFNClassifier(
+    model = EncoderOnlyClassifier(
         encoder=cfg.encoder,
         device=cfg.device,
         random_state=cfg.seed,
@@ -85,29 +85,49 @@ def run_train(config_path: Path) -> None:
     model.fit(
         X_train,
         dataset.y_train,
-        X_eval=X_val,
-        y_eval=dataset.y_val,
-        eval_metrics=cfg.metrics,
+        X_val=X_val,
+        y_val=dataset.y_val,
     )
-    benchmark_results = run_nominal_benchmarks(
-        dataset=dataset,
-        trained_model=model,
-        encoder_config=cfg.encoder,
-        output_dir=cfg.output_dir,
-        device=cfg.device,
-        random_state=cfg.seed,
+    source_val_metrics = model.evaluate(X_val, dataset.y_val)
+    X_test = dataset.graph_test if use_graph_encoder else dataset.X_test
+    if X_test is None:
+        raise RuntimeError("Graph encoder requested, but graph test dataset was not built.")
+    source_test_metrics = model.evaluate(X_test, dataset.y_test)
+    print(
+        "source_12_class val: "
+        + ", ".join(f"{key}={value:.3f}" for key, value in source_val_metrics.items())
     )
-    print_benchmark_summary(benchmark_results)
+    print(
+        "source_12_class test: "
+        + ", ".join(f"{key}={value:.3f}" for key, value in source_test_metrics.items())
+    )
 
-    metrics = {f"val_{key}": value for key, value in (model.latest_evaluation_ or {}).items()}
-    for family in ("baseline_tabpfn", "encoder_tabpfn", "encoder_only_classifier"):
-        for metric_name, metric_value in benchmark_results[family].items():
-            metrics[f"test_{family}_{metric_name}"] = metric_value
+    cp_generalization = _run_cp_generalization(
+        cfg=cfg,
+        model=model,
+        use_graph_encoder=use_graph_encoder,
+    )
+    open_data_generalization = _run_open_data_generalization(
+        cfg=cfg,
+        model=model,
+    )
+
+    metrics = {}
+    for metric_name, metric_value in source_val_metrics.items():
+        metrics[f"source_val_{metric_name}"] = metric_value
+    for metric_name, metric_value in source_test_metrics.items():
+        metrics[f"source_test_{metric_name}"] = metric_value
+    for family in ("baseline_tabpfn", "frozen_encoder_tabpfn", "delta"):
+        for metric_name, metric_value in cp_generalization[family].items():
+            metrics[f"cp_generalization_{family}_{metric_name}"] = metric_value
+        for metric_name, metric_value in open_data_generalization[family].items():
+            metrics[f"open_data_generalization_{family}_{metric_name}"] = metric_value
     metrics.update(
         {
             "n_train": int(len(dataset.y_train)),
             "n_val": int(len(dataset.y_val)),
-            "n_test_held_out": int(len(dataset.y_test)),
+            "n_test": int(len(dataset.y_test)),
+            "n_source_classes": 0 if model.classes_ is None else int(len(model.classes_)),
             "n_features": int(
                 cfg.encoder.output_dim if use_graph_encoder else dataset.X_train.shape[1]
             ),
@@ -127,15 +147,17 @@ def run_train(config_path: Path) -> None:
             print(f"{key}: {value}")
 
     model.prepare_for_serialization()
-    best_checkpoint_path = cfg.output_dir / "encoder_best_val_auc.pkl"
+    best_checkpoint_path = cfg.output_dir / "encoder_classifier.pkl"
     save_pickle(model, best_checkpoint_path)
     save_json(
         {
             "checkpoint": best_checkpoint_path,
             "best_epoch": model.best_epoch_,
-            "val_roc_auc": metrics.get("val_roc_auc"),
-            "val_accuracy": metrics.get("val_accuracy"),
-            "val_log_loss": metrics.get("val_log_loss"),
+            "source_val_roc_auc": metrics.get("source_val_roc_auc"),
+            "source_val_accuracy": metrics.get("source_val_accuracy"),
+            "source_val_log_loss": metrics.get("source_val_log_loss"),
+            "source_training_task": "12_class_supervised_encoder_pretraining",
+            "tabpfn_used_for_source_training": False,
         },
         cfg.output_dir / "best_checkpoint.json",
     )
@@ -144,12 +166,12 @@ def run_train(config_path: Path) -> None:
         metrics=metrics,
         training_summary=model.get_training_summary(),
         model=model,
-        model_artifact="encoder_tabpfn.pkl",
+        model_artifact="encoder_classifier.pkl",
         save_model=True,
         save_metrics=True,
     )
     epoch_log_path = cfg.output_dir / "epoch_metrics.csv"
-    pd.DataFrame([asdict(row) for row in model.epoch_metrics_]).to_csv(
+    pd.DataFrame([asdict(row) for row in model.history_]).to_csv(
         epoch_log_path,
         index=False,
     )
@@ -165,15 +187,19 @@ def run_transfer(config_path: Path, model_path: Path | None = None) -> None:
     set_global_seed(cfg.seed)
     output_dir = cfg.transfer.output_dir or cfg.output_dir / "gamgam_transfer"
     cache_dir = cfg.transfer.cache_dir or _cache_subdir(cfg.cache_dir, "gamgam_production_modes")
-    dataset = build_gamgam_dataset(
-        random_state=cfg.seed,
-        transfer_config=cfg.transfer,
-        cache_dir=cache_dir,
-    )
     resolved_model_path = (
         model_path
         or cfg.transfer.encoder_model
         or _default_encoder_checkpoint(cfg.output_dir)
+    )
+    trained = load_pickle(resolved_model_path)
+    if not isinstance(trained, EncoderOnlyClassifier):
+        raise TypeError("transfer --model must point to a saved EncoderOnlyClassifier.")
+    dataset = build_gamgam_dataset(
+        random_state=cfg.seed,
+        transfer_config=cfg.transfer,
+        cache_dir=cache_dir,
+        build_graphs=trained.is_graph_input_,
     )
     print(f"Using frozen encoder: {resolved_model_path}")
     print(f"Using GamGam cache dir: {cache_dir}")
@@ -183,26 +209,18 @@ def run_transfer(config_path: Path, model_path: Path | None = None) -> None:
         f"query_chunk={cfg.transfer.query_chunk_size}, "
         f"total={cfg.transfer.context_size + cfg.transfer.query_chunk_size}"
     )
-    metrics = run_gnn_transfer_evaluation(
-        encoder_model_path=resolved_model_path,
+    metrics = run_encoder_transfer_evaluation(
+        trained=trained,
         dataset=dataset,
         output_dir=output_dir,
         context_size=cfg.transfer.context_size,
         query_chunk_size=cfg.transfer.query_chunk_size,
         device=cfg.device,
         random_state=cfg.seed,
+        name="open_data_generalization",
     )
-    for family in (
-        "frozen_gnn_tabpfn",
-        "frozen_gnn_plus_flat_tabpfn",
-        "baseline_tabpfn",
-        "delta",
-        "plus_flat_delta",
-    ):
-        values = metrics[family]
-        text = ", ".join(f"{key}={value:.3f}" for key, value in values.items())
-        print(f"{family}: {text}")
-    print(f"saved transfer metrics: {output_dir / 'transfer_metrics.json'}")
+    print_transfer_summary("open_data_generalization", metrics)
+    print(f"saved transfer metrics: {output_dir / 'open_data_generalization_metrics.json'}")
 
 
 def _cache_subdir(cache_dir: Path | None, name: str) -> Path | None:
@@ -212,10 +230,80 @@ def _cache_subdir(cache_dir: Path | None, name: str) -> Path | None:
 
 
 def _default_encoder_checkpoint(output_dir: Path) -> Path:
-    best = output_dir / "encoder_best_val_auc.pkl"
-    if best.exists():
-        return best
-    return output_dir / "encoder_tabpfn.pkl"
+    return output_dir / "encoder_classifier.pkl"
+
+
+def _run_cp_generalization(
+    *,
+    cfg: Any,
+    model: EncoderOnlyClassifier,
+    use_graph_encoder: bool,
+) -> dict[str, Any]:
+    cp_dataset_config = _cp_generalization_dataset_config(cfg.dataset)
+    cache_dir = _cache_subdir(cfg.cache_dir, "cp_even_odd_generalization")
+    dataset = build_default_cp_dataset(
+        random_state=cfg.seed,
+        dataset_config=cp_dataset_config,
+        build_graphs=use_graph_encoder,
+        cache_dir=cache_dir,
+    )
+    output_dir = cfg.output_dir / "cp_generalization"
+    metrics = run_encoder_transfer_evaluation(
+        trained=model,
+        dataset=dataset,
+        output_dir=output_dir,
+        context_size=max(2, int(cfg.encoder.batch_size * cfg.encoder.support_query_ratio)),
+        query_chunk_size=max(
+            1,
+            int(cfg.encoder.batch_size * (1.0 - cfg.encoder.support_query_ratio)),
+        ),
+        device=cfg.device,
+        random_state=cfg.seed,
+        name="cp_even_odd_generalization",
+    )
+    print_transfer_summary("cp_even_odd_generalization", metrics)
+    return metrics
+
+
+def _run_open_data_generalization(
+    *,
+    cfg: Any,
+    model: EncoderOnlyClassifier,
+) -> dict[str, Any]:
+    output_dir = cfg.transfer.output_dir or cfg.output_dir / "open_data_generalization"
+    cache_dir = cfg.transfer.cache_dir or _cache_subdir(cfg.cache_dir, "gamgam_production_modes")
+    dataset = build_gamgam_dataset(
+        random_state=cfg.seed,
+        transfer_config=cfg.transfer,
+        cache_dir=cache_dir,
+        build_graphs=model.is_graph_input_,
+    )
+    metrics = run_encoder_transfer_evaluation(
+        trained=model,
+        dataset=dataset,
+        output_dir=output_dir,
+        context_size=cfg.transfer.context_size,
+        query_chunk_size=cfg.transfer.query_chunk_size,
+        device=cfg.device,
+        random_state=cfg.seed,
+        name="open_data_generalization",
+    )
+    print_transfer_summary("open_data_generalization", metrics)
+    return metrics
+
+
+def _cp_generalization_dataset_config(source: DatasetConfig) -> DatasetConfig:
+    raw_dir = source.raw_dir or Path("/global/cfs/projectdirs/atlas/joshua/gnn_data/stats_100K")
+    odd_filename = "ttH_CPodd_NLO.root"
+    if not (raw_dir / odd_filename).exists():
+        odd_filename = "ttH_CPodd.root"
+    return replace(
+        source,
+        labels=[
+            LabelFileConfig(label=0, files=["ttH_NLO.root"]),
+            LabelFileConfig(label=1, files=[odd_filename]),
+        ],
+    )
 
 
 if __name__ == "__main__":

@@ -492,6 +492,10 @@ class CPDatasetBuilder:
                     "test": self.test_fraction,
                 },
                 "label_files": self.label_files,
+                "label_names": {
+                    int(label): ",".join(Path(filename).stem for filename in files)
+                    for label, files in self.label_files.items()
+                },
                 "graph_features": None
                 if graph_all is None
                 else {
