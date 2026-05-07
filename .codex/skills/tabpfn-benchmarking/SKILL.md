@@ -10,6 +10,9 @@ description: Use when adding, reviewing, or interpreting benchmark/generalizatio
 Every default run trains the encoder on the 12-class source task without TabPFN,
 then freezes it for downstream TabPFN tests.
 
+Use `bash scripts/run_full_workflow.sh` to produce the nominal residual MLP, GNN,
+and transformer comparison runs. Pass config paths to restrict the workflow.
+
 Source metrics:
 
 - `source_val_*`

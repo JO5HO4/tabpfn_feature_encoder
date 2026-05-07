@@ -51,5 +51,5 @@ The cache fingerprint includes input files, branches, split fractions, padding, 
 For data changes, update or run:
 
 ```bash
-conda run -n tabpfn pytest -q tests/test_atlas_features.py tests/test_preprocessing.py tests/test_config.py
+bash scripts/run_tests.sh tests/test_atlas_features.py tests/test_preprocessing.py tests/test_config.py
 ```

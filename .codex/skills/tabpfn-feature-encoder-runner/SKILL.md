@@ -11,9 +11,11 @@ description: Use when running, configuring, validating, or documenting the tabpf
 - Main 12-class source residual config: `configs/source_residual_mlp.yaml`.
 - Particle GNN config: `configs/source_gnn.yaml`.
 - Particle transformer config: `configs/source_transformer.yaml`.
+- Full workflow launcher: `bash scripts/run_full_workflow.sh`.
 - Launcher: `bash scripts/run_source_encoder.sh`.
 - CP transfer rerun: `bash scripts/run_cp_transfer.sh`.
 - Open-data transfer rerun: `bash scripts/run_gamgam_transfer.sh`.
+- Test runner: `bash scripts/run_tests.sh`.
 - Package CLI: `tabpfn-encoder-train train --config configs/source_residual_mlp.yaml`.
 - Output dir is configured by `output_dir`.
 
@@ -29,6 +31,12 @@ python -m pip install -e ".[train,atlas,plots]"
 The runner falls back to `conda run --no-capture-output -n tabpfn` if the console script is not on `PATH`.
 
 ## Runner Behavior
+
+`scripts/run_full_workflow.sh`:
+
+- Runs `configs/source_residual_mlp.yaml`, `configs/source_gnn.yaml`, and `configs/source_transformer.yaml` by default.
+- For each config, trains the 12-class source encoder and then runs CP even/odd and open-data transfer evaluations.
+- Accepts optional config paths to restrict the workflow: `bash scripts/run_full_workflow.sh configs/source_residual_mlp.yaml`.
 
 `scripts/run_source_encoder.sh`:
 
@@ -54,8 +62,13 @@ The runner falls back to `conda run --no-capture-output -n tabpfn` if the consol
 Prefer these before finalizing code changes:
 
 ```bash
-conda run -n tabpfn pytest -q
-conda run -n tabpfn python -m compileall src tests
+bash scripts/run_tests.sh
+```
+
+Pass pytest selectors through for focused checks, for example:
+
+```bash
+bash scripts/run_tests.sh tests/test_config.py
 ```
 
 Clean generated Python/cache files before committing:

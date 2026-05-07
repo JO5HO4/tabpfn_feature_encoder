@@ -251,13 +251,31 @@ file is complete.
 
 ## Training
 
+Full workflow for the nominal benchmark:
+
+```bash
+bash scripts/run_full_workflow.sh
+```
+
+This runs the residual MLP, GNN, and transformer configs in sequence. For each
+config, the launcher trains on the 12-class source task, then runs the held-out
+CP even/odd transfer and ATLAS open-data GamGam transfer evaluations.
+
+To run only selected encoder configs:
+
+```bash
+bash scripts/run_full_workflow.sh \
+  configs/source_residual_mlp.yaml \
+  configs/source_transformer.yaml
+```
+
 Recommended launcher:
 
 ```bash
 bash scripts/run_source_encoder.sh
 ```
 
-The launcher:
+The one-config launcher:
 
 - Uses the `tabpfn` conda env automatically if the command is not already on `PATH`.
 - Sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
@@ -449,6 +467,11 @@ same total batch size. The default is now `1024 + 1024 = 2048`.
 ## Tests
 
 ```bash
-conda activate tabpfn
-pytest -q
+bash scripts/run_tests.sh
+```
+
+To run a subset, pass pytest paths or flags through:
+
+```bash
+bash scripts/run_tests.sh tests/test_config.py
 ```
