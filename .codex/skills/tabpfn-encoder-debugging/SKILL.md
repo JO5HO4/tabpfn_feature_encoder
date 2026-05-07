@@ -23,7 +23,13 @@ For the current config, `output_dim: 72` matches the feature count.
 - Source training uses `batch_size: 2048` supervised multiclass batches.
 - Validation uses the source validation split for early stopping.
 - CP even/odd and open-data generalization use TabPFN after source training.
-- Downstream context size is `batch_size * support_query_ratio`, currently 1024.
+- Downstream context is sampled from the downstream validation split.
+- Downstream context scans from `transfer.context_min_per_class` events/class
+  to the full validation split unless `transfer.context_size` caps it.
+- Each context size is repeated `transfer.context_repeats` times with different
+  stratified validation subsets.
+- Downstream query rows are processed in chunks of `transfer.query_chunk_size`,
+  currently 1024.
 
 ## Collapse Signals
 

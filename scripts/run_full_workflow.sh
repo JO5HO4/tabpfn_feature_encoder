@@ -46,7 +46,18 @@ if [[ "${max_jobs}" -gt "${#configs[@]}" ]]; then
 fi
 
 echo "Running full TabPFN feature-encoder workflow for ${#configs[@]} config(s)."
-echo "Each config trains the source encoder, then runs CP even/odd and GamGam transfer evaluations."
+echo "Each config trains the source encoder, then runs source, CP even/odd, and GamGam transfer evaluations."
+
+plot_comparison() {
+    if [[ "${TABPFN_WORKFLOW_PLOT:-1}" == "0" ]]; then
+        return
+    fi
+    echo
+    echo "================================================================"
+    echo "Plotting context-scan comparisons"
+    echo "================================================================"
+    "${SCRIPT_DIR}/plot_context_comparison.sh"
+}
 
 for config in "${configs[@]}"; do
     if [[ ! -f "${config}" ]]; then
@@ -74,6 +85,8 @@ if [[ "${max_jobs}" -le 1 ]]; then
         fi
     done
 
+    echo
+    plot_comparison
     echo
     echo "Full workflow complete."
     exit 0
@@ -144,5 +157,7 @@ if [[ "${failures}" -gt 0 ]]; then
     exit 1
 fi
 
+echo
+plot_comparison
 echo
 echo "Full workflow complete."

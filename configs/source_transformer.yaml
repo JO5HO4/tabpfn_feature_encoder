@@ -54,7 +54,9 @@ transfer:
   raw_dir: /global/cfs/projectdirs/atlas/haichen/opendata/GamGam_data
   output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_transformer/open_data_generalization
   tree_name: mini
-  context_size: 1024
+  context_min_per_class: 100
+  context_scan_points: 16
+  context_repeats: 5
   query_chunk_size: 1024
   split: {train: 0.5, val: 0.25, test: 0.25}
   labels:

@@ -215,7 +215,10 @@ class TransferConfig:
             NamedLabelFileConfig(4, "ZH", ["mc_345319.ZH125J_Zincl_gamgam.GamGam.root"]),
         ]
     )
-    context_size: int = 1024
+    context_size: int | None = None
+    context_min_per_class: int = 100
+    context_scan_points: int = 16
+    context_repeats: int = 5
     query_chunk_size: int = 1024
     encoder_model: Path | None = None
 
@@ -227,10 +230,23 @@ class TransferConfig:
         labels = payload.get("labels")
         if labels is not None and not isinstance(labels, list):
             raise TypeError("transfer.labels must be a list.")
-        context_size = int(payload.get("context_size", 1024))
+        context_size = (
+            int(payload["context_size"])
+            if payload.get("context_size") is not None
+            else None
+        )
+        context_min_per_class = int(payload.get("context_min_per_class", 100))
+        context_scan_points = int(payload.get("context_scan_points", 16))
+        context_repeats = int(payload.get("context_repeats", 5))
         query_chunk_size = int(payload.get("query_chunk_size", 1024))
-        if context_size <= 0:
+        if context_size is not None and context_size <= 0:
             raise ValueError("transfer.context_size must be positive.")
+        if context_min_per_class <= 0:
+            raise ValueError("transfer.context_min_per_class must be positive.")
+        if context_scan_points <= 0:
+            raise ValueError("transfer.context_scan_points must be positive.")
+        if context_repeats <= 0:
+            raise ValueError("transfer.context_repeats must be positive.")
         if query_chunk_size <= 0:
             raise ValueError("transfer.query_chunk_size must be positive.")
         return cls(
@@ -245,6 +261,9 @@ class TransferConfig:
                 else cls().labels
             ),
             context_size=context_size,
+            context_min_per_class=context_min_per_class,
+            context_scan_points=context_scan_points,
+            context_repeats=context_repeats,
             query_chunk_size=query_chunk_size,
             encoder_model=Path(payload["encoder_model"]) if "encoder_model" in payload else None,
         )

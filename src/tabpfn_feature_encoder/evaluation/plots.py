@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from tabpfn_feature_encoder.evaluation.metrics import binary_roc_auc
+
+
+CONTEXT_SCAN_TASKS = {
+    "source_12_class_generalization": (
+        "Source 12-Class",
+        Path("source_generalization/source_12_class_generalization_context_scan_metrics.csv"),
+    ),
+    "cp_even_odd_generalization": (
+        "CP Even/Odd",
+        Path("cp_generalization/cp_even_odd_generalization_context_scan_metrics.csv"),
+    ),
+    "open_data_generalization": (
+        "Open Data GamGam",
+        Path("open_data_generalization/open_data_generalization_context_scan_metrics.csv"),
+    ),
+}
 
 
 def collect_outputs(model: Any, X: Any, y: Any) -> dict[str, np.ndarray]:
@@ -98,6 +115,205 @@ def save_binary_classification_plots(
     )
     saved["predictions"] = predictions_path
     return saved
+
+
+def save_context_scan_plots(
+    records: list[dict[str, Any]],
+    output_dir: str | Path,
+    *,
+    prefix: str = "context_scan",
+) -> dict[str, Path]:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ImportError(
+            "matplotlib is required for plots. Install with "
+            "`python -m pip install -e '.[plots]'`."
+        ) from exc
+
+    ok_records = [record for record in records if record.get("status") == "ok"]
+    if not ok_records:
+        return {}
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved: dict[str, Path] = {}
+
+    for metric in ("roc_auc", "accuracy", "log_loss"):
+        baseline = _aggregate_records(ok_records, "baseline_tabpfn", metric)
+        frozen = _aggregate_records(ok_records, "frozen_encoder_tabpfn", metric)
+        fig, ax = plt.subplots(figsize=(6.0, 4.0))
+        ax.errorbar(
+            baseline["context_size"],
+            baseline["mean"],
+            yerr=baseline["std"],
+            marker="o",
+            capsize=3,
+            label="Baseline TabPFN",
+        )
+        ax.errorbar(
+            frozen["context_size"],
+            frozen["mean"],
+            yerr=frozen["std"],
+            marker="o",
+            capsize=3,
+            label="Frozen encoder + TabPFN",
+        )
+        ax.set_xscale("log")
+        ax.set_xlabel("Validation context events")
+        ax.set_ylabel(metric.replace("_", " ").title())
+        ax.set_title(f"Context Scan: {metric.replace('_', ' ').title()} Mean +/- 1 Std")
+        ax.legend()
+        fig.tight_layout()
+        path = out_dir / f"{prefix}_context_scan_{metric}.png"
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        saved[metric] = path
+
+    return saved
+
+
+def save_encoder_comparison_plots(
+    run_dirs: list[tuple[str, str | Path]],
+    output_dir: str | Path,
+) -> dict[str, list[Path]]:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ImportError(
+            "matplotlib is required for plots. Install with "
+            "`python -m pip install -e '.[plots]'`."
+        ) from exc
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved: dict[str, list[Path]] = {}
+
+    for task_name, (task_title, relative_csv) in CONTEXT_SCAN_TASKS.items():
+        loaded = [
+            (label, _read_context_scan_csv(Path(run_dir) / relative_csv))
+            for label, run_dir in run_dirs
+            if (Path(run_dir) / relative_csv).exists()
+        ]
+        loaded = [(label, rows) for label, rows in loaded if rows]
+        if not loaded:
+            continue
+
+        task_paths: list[Path] = []
+        for metric, ylabel in (("roc_auc", "AUC"), ("accuracy", "Accuracy")):
+            fig, ax = plt.subplots(figsize=(7.0, 4.6))
+            baseline_summary = _aggregate_csv_rows(loaded[0][1], f"baseline_{metric}")
+            _plot_context_summary(
+                ax,
+                baseline_summary,
+                label="Baseline TabPFN",
+                marker="o",
+                linewidth=2.0,
+            )
+            for label, rows in loaded:
+                encoder_summary = _aggregate_csv_rows(rows, f"frozen_encoder_{metric}")
+                _plot_context_summary(
+                    ax,
+                    encoder_summary,
+                    label=label,
+                    marker="s",
+                    linewidth=1.8,
+                )
+            ax.set_xscale("log")
+            ax.set_xlabel("Validation context events")
+            ax.set_ylabel(ylabel)
+            ax.set_title(f"{task_title}: {ylabel} vs Context Size")
+            ax.legend()
+            ax.grid(True, which="both", alpha=0.25)
+            fig.tight_layout()
+            path = out_dir / f"{task_name}_{metric}_comparison.pdf"
+            fig.savefig(path)
+            plt.close(fig)
+            task_paths.append(path)
+        saved[task_name] = task_paths
+
+    return saved
+
+
+def _aggregate_records(
+    records: list[dict[str, Any]],
+    family: str,
+    metric: str,
+) -> dict[str, np.ndarray]:
+    context_sizes = sorted({int(record["context_size"]) for record in records})
+    means: list[float] = []
+    stds: list[float] = []
+    for context_size in context_sizes:
+        values = [
+            float(record[family][metric])
+            for record in records
+            if int(record["context_size"]) == context_size
+        ]
+        means.append(float(np.mean(values)))
+        stds.append(float(np.std(values, ddof=1)) if len(values) > 1 else 0.0)
+    return {
+        "context_size": np.asarray(context_sizes, dtype=np.float64),
+        "mean": np.asarray(means, dtype=np.float64),
+        "std": np.asarray(stds, dtype=np.float64),
+    }
+
+
+def _read_context_scan_csv(path: Path) -> list[dict[str, str]]:
+    with open(path, encoding="utf-8", newline="") as handle:
+        return [row for row in csv.DictReader(handle) if row.get("status") == "ok"]
+
+
+def _aggregate_csv_rows(rows: list[dict[str, str]], value_col: str) -> dict[str, np.ndarray]:
+    context_sizes = sorted(
+        {
+            int(float(row["context_size"]))
+            for row in rows
+            if row.get(value_col) not in {None, ""}
+        }
+    )
+    means: list[float] = []
+    stds: list[float] = []
+    for context_size in context_sizes:
+        values = [
+            float(row[value_col])
+            for row in rows
+            if int(float(row["context_size"])) == context_size
+            and row.get(value_col) not in {None, ""}
+        ]
+        means.append(float(np.mean(values)))
+        stds.append(float(np.std(values, ddof=1)) if len(values) > 1 else 0.0)
+    return {
+        "context_size": np.asarray(context_sizes, dtype=np.float64),
+        "mean": np.asarray(means, dtype=np.float64),
+        "std": np.asarray(stds, dtype=np.float64),
+    }
+
+
+def _plot_context_summary(
+    ax: Any,
+    summary: dict[str, np.ndarray],
+    *,
+    label: str,
+    marker: str,
+    linewidth: float,
+) -> None:
+    if len(summary["context_size"]) == 0:
+        return
+    ax.errorbar(
+        summary["context_size"],
+        summary["mean"],
+        yerr=summary["std"],
+        marker=marker,
+        linewidth=linewidth,
+        capsize=3,
+        label=label,
+    )
 
 
 def _confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, labels: list[int]) -> np.ndarray:

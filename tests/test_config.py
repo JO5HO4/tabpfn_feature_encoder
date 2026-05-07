@@ -48,6 +48,9 @@ def test_project_config_from_dict() -> None:
                 "output_dir": "/tmp/transfer-out",
                 "tree_name": "mini",
                 "context_size": 128,
+                "context_min_per_class": 10,
+                "context_scan_points": 5,
+                "context_repeats": 3,
                 "query_chunk_size": 64,
                 "labels": [
                     {"label": 0, "name": "ttH", "files": ["ttH.root"]},
@@ -91,6 +94,9 @@ def test_project_config_from_dict() -> None:
     assert cfg.transfer.output_dir == Path("/tmp/transfer-out")
     assert cfg.transfer.tree_name == "mini"
     assert cfg.transfer.context_size == 128
+    assert cfg.transfer.context_min_per_class == 10
+    assert cfg.transfer.context_scan_points == 5
+    assert cfg.transfer.context_repeats == 3
     assert cfg.transfer.query_chunk_size == 64
     assert cfg.transfer.labels[0].name == "ttH"
     assert cfg.transfer.labels[1].files == ["ggF.root"]
@@ -109,7 +115,10 @@ def test_encoder_defaults_match_main_training_config() -> None:
     assert cfg.encoder.batch_size == 2048
     assert cfg.encoder.early_stopping_patience == 8
     assert cfg.encoder.min_delta == 0.001
-    assert cfg.transfer.context_size == 1024
+    assert cfg.transfer.context_size is None
+    assert cfg.transfer.context_min_per_class == 100
+    assert cfg.transfer.context_scan_points == 16
+    assert cfg.transfer.context_repeats == 5
     assert cfg.transfer.query_chunk_size == 1024
 
 
@@ -140,4 +149,8 @@ def test_source_encoder_configs_have_clear_output_names() -> None:
         assert cfg.encoder.type == encoder_type
         assert cfg.output_dir.name == run_name
         assert cfg.transfer.output_dir == cfg.output_dir / "open_data_generalization"
+        assert cfg.transfer.context_size is None
+        assert cfg.transfer.context_min_per_class == 100
+        assert cfg.transfer.context_scan_points == 16
+        assert cfg.transfer.context_repeats == 5
         assert len(cfg.dataset.labels) == 12

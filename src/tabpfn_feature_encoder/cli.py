@@ -12,8 +12,9 @@ from tabpfn_feature_encoder.data.atlas_root import build_default_cp_dataset
 from tabpfn_feature_encoder.data.gamgam_root import build_gamgam_dataset
 from tabpfn_feature_encoder.evaluation.transfer import (
     print_transfer_summary,
-    run_encoder_transfer_evaluation,
+    run_encoder_context_scan_evaluation,
 )
+from tabpfn_feature_encoder.evaluation.plots import save_encoder_comparison_plots
 from tabpfn_feature_encoder.training.artifacts import save_training_artifacts
 from tabpfn_feature_encoder.training.encoder_classifier import EncoderOnlyClassifier
 from tabpfn_feature_encoder.utils.io import load_pickle, save_json, save_pickle
@@ -25,6 +26,16 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     train = subparsers.add_parser("train", help="Run encoder training from a YAML config.")
     train.add_argument("--config", required=True, help="Path to YAML config.")
+    source_transfer = subparsers.add_parser(
+        "transfer-source",
+        help="Evaluate a frozen source-trained encoder on the 12-class source task.",
+    )
+    source_transfer.add_argument("--config", required=True, help="Path to YAML config.")
+    source_transfer.add_argument(
+        "--model",
+        default=None,
+        help="Path to saved encoder checkpoint. Defaults to output_dir/encoder_classifier.pkl.",
+    )
     transfer = subparsers.add_parser(
         "transfer",
         help="Evaluate a frozen source-trained encoder on GamGam production modes.",
@@ -48,6 +59,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to saved encoder checkpoint. Defaults to output_dir/encoder_classifier.pkl.",
     )
+    plot = subparsers.add_parser(
+        "plot-context-comparison",
+        help="Plot context-scan comparison curves across trained encoder runs.",
+    )
+    plot.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for comparison PDFs. Defaults to ../runs/context_scan_comparison.",
+    )
+    plot.add_argument(
+        "--run",
+        action="append",
+        nargs=2,
+        metavar=("LABEL", "DIR"),
+        default=None,
+        help="Run label and output directory. May be repeated.",
+    )
     return parser
 
 
@@ -56,12 +84,22 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.command == "train":
         run_train(Path(args.config))
+    elif args.command == "transfer-source":
+        run_source_transfer(
+            Path(args.config),
+            model_path=None if args.model is None else Path(args.model),
+        )
     elif args.command == "transfer":
         run_transfer(Path(args.config), model_path=None if args.model is None else Path(args.model))
     elif args.command == "transfer-cp":
         run_cp_transfer(
             Path(args.config),
             model_path=None if args.model is None else Path(args.model),
+        )
+    elif args.command == "plot-context-comparison":
+        run_plot_context_comparison(
+            output_dir=None if args.output_dir is None else Path(args.output_dir),
+            runs=args.run,
         )
     else:
         parser.error(f"Unknown command: {args.command}")
@@ -117,6 +155,11 @@ def run_train(config_path: Path) -> None:
         + ", ".join(f"{key}={value:.3f}" for key, value in source_test_metrics.items())
     )
 
+    source_generalization = _run_source_generalization(
+        cfg=cfg,
+        model=model,
+        dataset=dataset,
+    )
     cp_generalization = _run_cp_generalization(
         cfg=cfg,
         model=model,
@@ -133,6 +176,8 @@ def run_train(config_path: Path) -> None:
     for metric_name, metric_value in source_test_metrics.items():
         metrics[f"source_test_{metric_name}"] = metric_value
     for family in ("baseline_tabpfn", "frozen_encoder_tabpfn", "delta"):
+        for metric_name, metric_value in source_generalization[family].items():
+            metrics[f"source_generalization_{family}_{metric_name}"] = metric_value
         for metric_name, metric_value in cp_generalization[family].items():
             metrics[f"cp_generalization_{family}_{metric_name}"] = metric_value
         for metric_name, metric_value in open_data_generalization[family].items():
@@ -197,6 +242,32 @@ def run_train(config_path: Path) -> None:
         print(f"saved {name}: {path}")
 
 
+def run_source_transfer(config_path: Path, model_path: Path | None = None) -> dict[str, Any]:
+    cfg = load_project_config(config_path)
+    set_global_seed(cfg.seed)
+    resolved_model_path, trained = _load_encoder_checkpoint(
+        cfg=cfg,
+        model_path=model_path,
+        allow_transfer_config=False,
+        command_name="transfer-source",
+    )
+    dataset = build_default_cp_dataset(
+        random_state=cfg.seed,
+        dataset_config=cfg.dataset,
+        build_graphs=trained.is_graph_input_,
+        cache_dir=_cache_subdir(cfg.cache_dir, "source_multiclass"),
+    )
+    print(f"Using frozen encoder: {resolved_model_path}")
+    metrics = _run_source_generalization(
+        cfg=cfg,
+        model=trained,
+        dataset=dataset,
+    )
+    output_dir = cfg.output_dir / "source_generalization"
+    print(f"saved transfer metrics: {output_dir / 'source_12_class_generalization_metrics.json'}")
+    return metrics
+
+
 def run_transfer(config_path: Path, model_path: Path | None = None) -> None:
     cfg = load_project_config(config_path)
     set_global_seed(cfg.seed)
@@ -217,16 +288,22 @@ def run_transfer(config_path: Path, model_path: Path | None = None) -> None:
     print(f"Using frozen encoder: {resolved_model_path}")
     print(f"Using GamGam cache dir: {cache_dir}")
     print(
-        "Transfer TabPFN batch: "
-        f"context={cfg.transfer.context_size}, "
+        "Transfer TabPFN context scan: "
+        f"context_split=val, min_per_class={cfg.transfer.context_min_per_class}, "
+        f"points={cfg.transfer.context_scan_points}, "
+        f"repeats={cfg.transfer.context_repeats}, "
+        f"max_context={cfg.transfer.context_size or 'full_val'}, "
         f"query_chunk={cfg.transfer.query_chunk_size}, "
-        f"total={cfg.transfer.context_size + cfg.transfer.query_chunk_size}"
+        "query_split=test"
     )
-    metrics = run_encoder_transfer_evaluation(
+    metrics = run_encoder_context_scan_evaluation(
         trained=trained,
         dataset=dataset,
         output_dir=output_dir,
-        context_size=cfg.transfer.context_size,
+        context_min_per_class=cfg.transfer.context_min_per_class,
+        context_scan_points=cfg.transfer.context_scan_points,
+        context_repeats=cfg.transfer.context_repeats,
+        max_context_size=cfg.transfer.context_size,
         query_chunk_size=cfg.transfer.query_chunk_size,
         device=cfg.device,
         random_state=cfg.seed,
@@ -254,6 +331,27 @@ def run_cp_transfer(config_path: Path, model_path: Path | None = None) -> dict[s
     output_dir = cfg.output_dir / "cp_generalization"
     print(f"saved transfer metrics: {output_dir / 'cp_even_odd_generalization_metrics.json'}")
     return metrics
+
+
+def run_plot_context_comparison(
+    *,
+    output_dir: Path | None,
+    runs: list[list[str]] | None,
+) -> dict[str, list[Path]]:
+    run_specs = (
+        [(str(label), Path(path)) for label, path in runs]
+        if runs
+        else _default_comparison_runs()
+    )
+    resolved_output_dir = output_dir or _default_runs_root() / "context_scan_comparison"
+    saved = save_encoder_comparison_plots(run_specs, resolved_output_dir)
+    if not saved:
+        print("No context-scan CSV files found for comparison plotting.")
+        return saved
+    for task_name, paths in saved.items():
+        for path in paths:
+            print(f"saved {task_name} comparison plot: {path}")
+    return saved
 
 
 def _cache_subdir(cache_dir: Path | None, name: str) -> Path | None:
@@ -284,6 +382,52 @@ def _default_encoder_checkpoint(output_dir: Path) -> Path:
     return output_dir / "encoder_classifier.pkl"
 
 
+def _default_runs_root() -> Path:
+    return Path(__file__).resolve().parents[3] / "runs"
+
+
+def _default_comparison_runs() -> list[tuple[str, Path]]:
+    root = _default_runs_root()
+    return [
+        ("MLP encoder", root / "source_residual_mlp"),
+        ("GNN encoder", root / "source_gnn"),
+        ("Transformer encoder", root / "source_transformer"),
+    ]
+
+
+def _run_source_generalization(
+    *,
+    cfg: Any,
+    model: EncoderOnlyClassifier,
+    dataset: Any,
+) -> dict[str, Any]:
+    output_dir = cfg.output_dir / "source_generalization"
+    print(
+        "Source 12-class TabPFN context scan: "
+        f"context_split=val, min_per_class={cfg.transfer.context_min_per_class}, "
+        f"points={cfg.transfer.context_scan_points}, "
+        f"repeats={cfg.transfer.context_repeats}, "
+        f"max_context={cfg.transfer.context_size or 'full_val'}, "
+        f"query_chunk={cfg.transfer.query_chunk_size}, "
+        "query_split=test"
+    )
+    metrics = run_encoder_context_scan_evaluation(
+        trained=model,
+        dataset=dataset,
+        output_dir=output_dir,
+        context_min_per_class=cfg.transfer.context_min_per_class,
+        context_scan_points=cfg.transfer.context_scan_points,
+        context_repeats=cfg.transfer.context_repeats,
+        max_context_size=cfg.transfer.context_size,
+        query_chunk_size=cfg.transfer.query_chunk_size,
+        device=cfg.device,
+        random_state=cfg.seed,
+        name="source_12_class_generalization",
+    )
+    print_transfer_summary("source_12_class_generalization", metrics)
+    return metrics
+
+
 def _run_cp_generalization(
     *,
     cfg: Any,
@@ -299,15 +443,24 @@ def _run_cp_generalization(
         cache_dir=cache_dir,
     )
     output_dir = cfg.output_dir / "cp_generalization"
-    metrics = run_encoder_transfer_evaluation(
+    print(
+        "CP transfer TabPFN context scan: "
+        f"context_split=val, min_per_class={cfg.transfer.context_min_per_class}, "
+        f"points={cfg.transfer.context_scan_points}, "
+        f"repeats={cfg.transfer.context_repeats}, "
+        f"max_context={cfg.transfer.context_size or 'full_val'}, "
+        f"query_chunk={cfg.transfer.query_chunk_size}, "
+        "query_split=test"
+    )
+    metrics = run_encoder_context_scan_evaluation(
         trained=model,
         dataset=dataset,
         output_dir=output_dir,
-        context_size=max(2, int(cfg.encoder.batch_size * cfg.encoder.support_query_ratio)),
-        query_chunk_size=max(
-            1,
-            int(cfg.encoder.batch_size * (1.0 - cfg.encoder.support_query_ratio)),
-        ),
+        context_min_per_class=cfg.transfer.context_min_per_class,
+        context_scan_points=cfg.transfer.context_scan_points,
+        context_repeats=cfg.transfer.context_repeats,
+        max_context_size=cfg.transfer.context_size,
+        query_chunk_size=cfg.transfer.query_chunk_size,
         device=cfg.device,
         random_state=cfg.seed,
         name="cp_even_odd_generalization",
@@ -329,11 +482,14 @@ def _run_open_data_generalization(
         cache_dir=cache_dir,
         build_graphs=model.is_graph_input_,
     )
-    metrics = run_encoder_transfer_evaluation(
+    metrics = run_encoder_context_scan_evaluation(
         trained=model,
         dataset=dataset,
         output_dir=output_dir,
-        context_size=cfg.transfer.context_size,
+        context_min_per_class=cfg.transfer.context_min_per_class,
+        context_scan_points=cfg.transfer.context_scan_points,
+        context_repeats=cfg.transfer.context_repeats,
+        max_context_size=cfg.transfer.context_size,
         query_chunk_size=cfg.transfer.query_chunk_size,
         device=cfg.device,
         random_state=cfg.seed,

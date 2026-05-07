@@ -15,7 +15,7 @@ held-out downstream tasks.
 5. Train the encoder with a direct supervised multiclass head on 12 source labels.
 6. Keep TabPFN out of source training, which avoids the default 10-class TabPFN limit.
 7. Restore the best validation-AUC encoder and report source test metrics.
-8. Freeze the encoder and run TabPFN generalization tests on held-out CP even/odd and open data.
+8. Freeze the encoder and run TabPFN context scans on the source task, held-out CP even/odd, and open data.
 
 ## Encoder Choice
 
@@ -169,7 +169,9 @@ transfer:
   raw_dir: /global/cfs/projectdirs/atlas/haichen/opendata/GamGam_data
   output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_residual_mlp/open_data_generalization
   tree_name: mini
-  context_size: 1024
+  context_min_per_class: 100
+  context_scan_points: 16
+  context_repeats: 5
   query_chunk_size: 1024
   split: {train: 0.5, val: 0.25, test: 0.25}
   labels:
@@ -191,11 +193,15 @@ split: 50/25/25 stratified train/validation/test
 ```
 
 With `batch_size: 2048`, the source classifier updates on 2048 training events
-per optimizer step. For downstream TabPFN tests, `support_query_ratio: 0.5` gives:
+per optimizer step. Downstream TabPFN inference is separate from source training:
+it scans context sizes sampled from the downstream validation split, then
+predicts the held-out test split in chunks of `transfer.query_chunk_size`.
 
 ```text
-support: 1024
-query: 1024
+context: 100 events/class -> full validation split
+scan points: 16
+subsets per point: 5
+query chunk: 1024
 ```
 
 With the default `type: residual_mlp`, `output_dim: 72` is the flat feature count
@@ -224,9 +230,10 @@ With `type: residual_mlp`, `type: feature_mixer`, or `type: feature_gate`,
 `output_dim` must match the number of flat input features, currently 72.
 
 Source validation is the direct 12-class classifier validation split and drives
-early stopping. Downstream TabPFN tests use either the CP context/query sizes
-derived from `batch_size * support_query_ratio`, or the explicit
-`transfer.context_size` and `transfer.query_chunk_size` values for open data.
+early stopping. Downstream CP even/odd and open-data TabPFN tests use their own
+validation split as the TabPFN context pool and their test split as the query
+set. Set `transfer.context_size` only when you want to cap the largest scanned
+context size; by default the scan reaches the full validation split.
 
 ## Data Cache
 
@@ -324,28 +331,36 @@ head on the 12-class source task. Labels are mapped internally to contiguous
 classifier indices, so this path bypasses TabPFN's default 10-class limit. The
 saved encoder checkpoint keeps the source label scheme in `training_summary.json`.
 
-After source training, the run freezes the encoder and evaluates CP even/odd and
-open-data generalization with TabPFN:
+After source training, the run freezes the encoder and evaluates source,
+CP even/odd, and open-data generalization with TabPFN:
 
-1. `baseline_tabpfn`: TabPFN on the held-out CP flat features.
+1. `baseline_tabpfn`: TabPFN on the downstream flat features.
 2. `frozen_encoder_tabpfn`: frozen source encoder output sent into TabPFN.
 3. `delta`: frozen encoder metrics minus baseline metrics.
 
 ## Transfer Evaluation
 
-The default `train` command runs the 5-class ATLAS open-data Higgs
-production-mode task after CP even/odd. The separate `transfer` command reruns
-that same open-data comparison from a saved checkpoint. The separate
-`transfer-cp` command reruns only the held-out CP even/odd comparison.
+The default `train` command runs three TabPFN context scans after source encoder
+training: the 12-class source task itself, held-out CP even/odd, and the 5-class
+ATLAS open-data Higgs production-mode task. The separate `transfer-source`,
+`transfer-cp`, and `transfer` commands rerun those comparisons from a saved
+checkpoint.
 
 ```text
 ttH vs ggF vs VBF vs WH vs ZH
 ```
 
-It compares two TabPFN evaluations on the same GamGam train/test split:
+It compares two TabPFN evaluations on the same GamGam validation/test split:
 
-1. `frozen_encoder_tabpfn`: source-trained encoder is frozen, open-data events are encoded, then TabPFN is fit on encoded context events.
-2. `baseline_tabpfn`: TabPFN is fit directly on CP-compatible flat open-data features.
+1. `frozen_encoder_tabpfn`: source-trained encoder is frozen, validation events are encoded as the TabPFN context, and test events are encoded as the TabPFN query.
+2. `baseline_tabpfn`: TabPFN is fit directly on CP-compatible flat validation context features and evaluated on test features.
+
+The context scan starts at `transfer.context_min_per_class` events per class,
+uses `transfer.context_scan_points` log-spaced context sizes, repeats each size
+`transfer.context_repeats` times with different stratified validation-context
+subsets, and ends at the full validation split unless `transfer.context_size`
+caps it. Every scan point evaluates the full downstream test split, chunked by
+`transfer.query_chunk_size`.
 
 Run the standalone CP transfer command after training when you want to rerun only
 the CP even/odd comparison:
@@ -364,8 +379,39 @@ CP transfer outputs are written to `output_dir/cp_generalization`:
 
 ```text
 cp_even_odd_generalization_metrics.json
+cp_even_odd_generalization_context_scan_metrics.json
+cp_even_odd_generalization_context_scan_metrics.csv
+cp_even_odd_generalization_context_scan_roc_auc.png
+cp_even_odd_generalization_context_scan_accuracy.png
+cp_even_odd_generalization_context_scan_log_loss.png
 cp_even_odd_generalization_frozen_encoder_proba.npy
 cp_even_odd_generalization_baseline_proba.npy
+```
+
+Run the standalone source transfer command when you want to rerun only the
+12-class source-task comparison:
+
+```bash
+bash scripts/run_source_transfer.sh
+```
+
+or directly:
+
+```bash
+tabpfn-encoder-train transfer-source --config configs/source_residual_mlp.yaml
+```
+
+Source transfer outputs are written to `output_dir/source_generalization`:
+
+```text
+source_12_class_generalization_metrics.json
+source_12_class_generalization_context_scan_metrics.json
+source_12_class_generalization_context_scan_metrics.csv
+source_12_class_generalization_context_scan_roc_auc.png
+source_12_class_generalization_context_scan_accuracy.png
+source_12_class_generalization_context_scan_log_loss.png
+source_12_class_generalization_frozen_encoder_proba.npy
+source_12_class_generalization_baseline_proba.npy
 ```
 
 Run the standalone open-data transfer command when you want to rerun only the
@@ -388,6 +434,10 @@ tabpfn-encoder-train transfer-cp \
   --config configs/source_residual_mlp.yaml \
   --model /path/to/encoder_classifier.pkl
 
+tabpfn-encoder-train transfer-source \
+  --config configs/source_residual_mlp.yaml \
+  --model /path/to/encoder_classifier.pkl
+
 tabpfn-encoder-train transfer \
   --config configs/source_residual_mlp.yaml \
   --model /path/to/encoder_classifier.pkl
@@ -397,9 +447,31 @@ Open-data transfer outputs are written to `transfer.output_dir`:
 
 ```text
 open_data_generalization_metrics.json
+open_data_generalization_context_scan_metrics.json
+open_data_generalization_context_scan_metrics.csv
+open_data_generalization_context_scan_roc_auc.png
+open_data_generalization_context_scan_accuracy.png
+open_data_generalization_context_scan_log_loss.png
 open_data_generalization_frozen_encoder_proba.npy
 open_data_generalization_baseline_proba.npy
 ```
+
+After all three default encoders have finished, the full workflow writes
+comparison PDFs to:
+
+```text
+/global/cfs/projectdirs/atlas/joshua/tabpfn/runs/context_scan_comparison/
+```
+
+The standalone plotting command is:
+
+```bash
+bash scripts/plot_context_comparison.sh
+```
+
+It makes AUC and accuracy PDFs for each task, with one baseline TabPFN curve and
+one curve each for the MLP, GNN, and transformer encoders. Error bars are the
+standard deviation over the repeated validation-context subsets.
 
 ## Expected Logs
 
@@ -412,9 +484,20 @@ Encoder-only classifier settings: type=residual_mlp, device=cuda, layers=4, hidd
 encoder_only epoch 1/20: train_loss=..., train_accuracy=..., train_roc_auc=..., batches=49/49, val_loss=..., val_accuracy=..., val_roc_auc=...
 source_12_class val: accuracy=..., log_loss=..., roc_auc=...
 source_12_class test: accuracy=..., log_loss=..., roc_auc=...
+source_12_class_generalization context=1200 repeat=1/5: baseline_auc=..., encoder_auc=..., delta_auc=...
+source_12_class_generalization context=... repeat=.../5: baseline_auc=..., encoder_auc=..., delta_auc=...
+source_12_class_generalization context scan: split=val, query=test, completed=.../..., summary_context=...
+source_12_class_generalization baseline_tabpfn: accuracy=..., log_loss=..., roc_auc=...
+source_12_class_generalization frozen_encoder_tabpfn: accuracy=..., log_loss=..., roc_auc=...
+source_12_class_generalization delta: accuracy=..., log_loss=..., roc_auc=...
+cp_even_odd_generalization context=200 repeat=1/5: baseline_auc=..., encoder_auc=..., delta_auc=...
+cp_even_odd_generalization context=... repeat=.../5: baseline_auc=..., encoder_auc=..., delta_auc=...
+cp_even_odd_generalization context scan: split=val, query=test, completed=.../..., summary_context=...
 cp_even_odd_generalization baseline_tabpfn: accuracy=..., log_loss=..., roc_auc=...
 cp_even_odd_generalization frozen_encoder_tabpfn: accuracy=..., log_loss=..., roc_auc=...
 cp_even_odd_generalization delta: accuracy=..., log_loss=..., roc_auc=...
+open_data_generalization context=... repeat=.../5: baseline_auc=..., encoder_auc=..., delta_auc=...
+open_data_generalization context scan: split=val, query=test, completed=.../..., summary_context=...
 open_data_generalization baseline_tabpfn: accuracy=..., log_loss=..., roc_auc=...
 open_data_generalization frozen_encoder_tabpfn: accuracy=..., log_loss=..., roc_auc=...
 open_data_generalization delta: accuracy=..., log_loss=..., roc_auc=...
@@ -437,7 +520,20 @@ training_summary.json
 epoch_metrics.csv
 encoder_classifier.pkl
 best_checkpoint.json
+source_generalization/source_12_class_generalization_metrics.json
+source_generalization/source_12_class_generalization_context_scan_metrics.json
+source_generalization/source_12_class_generalization_context_scan_metrics.csv
+source_generalization/source_12_class_generalization_context_scan_roc_auc.png
+source_generalization/source_12_class_generalization_context_scan_accuracy.png
+source_generalization/source_12_class_generalization_context_scan_log_loss.png
+source_generalization/source_12_class_generalization_baseline_proba.npy
+source_generalization/source_12_class_generalization_frozen_encoder_proba.npy
 cp_generalization/cp_even_odd_generalization_metrics.json
+cp_generalization/cp_even_odd_generalization_context_scan_metrics.json
+cp_generalization/cp_even_odd_generalization_context_scan_metrics.csv
+cp_generalization/cp_even_odd_generalization_context_scan_roc_auc.png
+cp_generalization/cp_even_odd_generalization_context_scan_accuracy.png
+cp_generalization/cp_even_odd_generalization_context_scan_log_loss.png
 cp_generalization/cp_even_odd_generalization_baseline_proba.npy
 cp_generalization/cp_even_odd_generalization_frozen_encoder_proba.npy
 ```
@@ -446,14 +542,30 @@ Open-data generalization artifacts are written to `transfer.output_dir`:
 
 ```text
 open_data_generalization_metrics.json
+open_data_generalization_context_scan_metrics.json
+open_data_generalization_context_scan_metrics.csv
+open_data_generalization_context_scan_roc_auc.png
+open_data_generalization_context_scan_accuracy.png
+open_data_generalization_context_scan_log_loss.png
 open_data_generalization_baseline_proba.npy
 open_data_generalization_frozen_encoder_proba.npy
 ```
 
+Cross-encoder comparison PDFs are written to the shared runs directory:
+
+```text
+context_scan_comparison/source_12_class_generalization_roc_auc_comparison.pdf
+context_scan_comparison/source_12_class_generalization_accuracy_comparison.pdf
+context_scan_comparison/cp_even_odd_generalization_roc_auc_comparison.pdf
+context_scan_comparison/cp_even_odd_generalization_accuracy_comparison.pdf
+context_scan_comparison/open_data_generalization_roc_auc_comparison.pdf
+context_scan_comparison/open_data_generalization_accuracy_comparison.pdf
+```
+
 `epoch_metrics.csv` is the easiest file to inspect during development. It contains
 one row per epoch with train loss/accuracy/AUC and validation loss/accuracy/AUC.
-`metrics.json` contains source validation/test metrics plus CP even/odd and
-open-data generalization summaries. `encoder_classifier.pkl` is the checkpoint
+`metrics.json` contains source validation/test metrics plus source, CP even/odd,
+and open-data generalization summaries. `encoder_classifier.pkl` is the checkpoint
 to load for standalone transfer reruns. It keeps the trained encoder,
 classifier head, label scheme, and preprocessing state on CPU so it can be
 reused without a GPU session. If
@@ -476,9 +588,12 @@ batch_size: 2048
 batch_size: 1024
 ```
 
-Avoid very large batches like `8192` unless you have confirmed enough GPU memory.
-For transfer, keep `transfer.context_size + transfer.query_chunk_size` near the
-same total batch size. The default is now `1024 + 1024 = 2048`.
+Avoid very large training batches like `8192` unless you have confirmed enough
+GPU memory. For transfer, the scan starts small and grows toward the full
+validation split. If a large context size OOMs, the scan records that failed
+point, keeps the smaller completed points, and stops the larger part of the
+scan. To cap the scan manually, set `transfer.context_size`; reduce
+`transfer.query_chunk_size` only if test prediction chunks are the bottleneck.
 
 ## Tests
 

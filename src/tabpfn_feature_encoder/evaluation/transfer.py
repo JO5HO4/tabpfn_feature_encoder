@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import Any
 
@@ -27,22 +28,52 @@ def run_encoder_transfer_evaluation(
     name: str,
 ) -> dict[str, Any]:
     """Evaluate a frozen supervised encoder on a downstream TabPFN task."""
-
-    effective_device = _effective_device(device)
-    _move_encoder(trained, effective_device)
-    y_train = np.asarray(dataset.y_train, dtype=np.int64)
-    y_test = np.asarray(dataset.y_test, dtype=np.int64)
-    context_idx = stratified_sample_indices(
-        y_train,
-        n_samples=min(int(context_size), len(y_train)),
-        random_state=random_state + 30_000,
-    )
-
-    encoded_context = _encode_subset(
+    return run_encoder_context_scan_evaluation(
         trained=trained,
         dataset=dataset,
-        split="train",
-        indices=context_idx,
+        output_dir=output_dir,
+        context_min_per_class=1,
+        context_scan_points=1,
+        context_repeats=1,
+        max_context_size=context_size,
+        query_chunk_size=query_chunk_size,
+        device=device,
+        random_state=random_state,
+        name=name,
+    )
+
+
+def run_encoder_context_scan_evaluation(
+    *,
+    trained: EncoderOnlyClassifier,
+    dataset: DatasetBundle,
+    output_dir: str | Path,
+    context_min_per_class: int,
+    context_scan_points: int,
+    context_repeats: int,
+    max_context_size: int | None,
+    query_chunk_size: int,
+    device: str,
+    random_state: int,
+    name: str,
+) -> dict[str, Any]:
+    """Scan TabPFN downstream context size using validation as context and test as query."""
+    effective_device = _effective_device(device)
+    _move_encoder(trained, effective_device)
+    y_context_pool = np.asarray(dataset.y_val, dtype=np.int64)
+    y_test = np.asarray(dataset.y_test, dtype=np.int64)
+    context_sizes = _context_scan_sizes(
+        y_context_pool,
+        min_per_class=context_min_per_class,
+        n_points=context_scan_points,
+        max_context_size=max_context_size,
+    )
+
+    encoded_context_pool = _encode_subset(
+        trained=trained,
+        dataset=dataset,
+        split="val",
+        indices=None,
         batch_size=query_chunk_size,
     )
     encoded_test = _encode_subset(
@@ -52,42 +83,107 @@ def run_encoder_transfer_evaluation(
         indices=None,
         batch_size=query_chunk_size,
     )
-    encoded_proba = _tabpfn_predict_proba(
-        X_context=encoded_context,
-        y_context=y_train[context_idx],
-        X_query=encoded_test,
-        query_chunk_size=query_chunk_size,
-        device=effective_device,
-    )
-    encoded_metrics = _classification_metrics(y_test, encoded_proba)
+    flat_context_pool = dataset.X_val.to_numpy(dtype=np.float32)
+    flat_test_raw = dataset.X_test.to_numpy(dtype=np.float32)
 
-    flat_standardizer = Standardizer().fit(dataset.X_train.to_numpy(dtype=np.float32))
-    flat_train = flat_standardizer.transform(dataset.X_train.to_numpy(dtype=np.float32))
-    flat_test = flat_standardizer.transform(dataset.X_test.to_numpy(dtype=np.float32))
-    baseline_proba = _tabpfn_predict_proba(
-        X_context=flat_train[context_idx],
-        y_context=y_train[context_idx],
-        X_query=flat_test,
-        query_chunk_size=query_chunk_size,
-        device=effective_device,
-    )
-    baseline_metrics = _classification_metrics(y_test, baseline_proba)
+    records: list[dict[str, Any]] = []
+    last_encoded_proba: np.ndarray | None = None
+    last_baseline_proba: np.ndarray | None = None
+    for scan_idx, context_size in enumerate(context_sizes):
+        size_oom = False
+        for repeat_idx in range(int(context_repeats)):
+            context_idx = stratified_sample_indices(
+                y_context_pool,
+                n_samples=int(context_size),
+                random_state=random_state + 30_000 + scan_idx * 1_000 + repeat_idx,
+            )
+            context_counts = _class_counts(y_context_pool[context_idx])
+            try:
+                encoded_proba = _tabpfn_predict_proba(
+                    X_context=encoded_context_pool[context_idx],
+                    y_context=y_context_pool[context_idx],
+                    X_query=encoded_test,
+                    query_chunk_size=query_chunk_size,
+                    device=effective_device,
+                )
+                encoded_metrics = _classification_metrics(y_test, encoded_proba)
+
+                flat_standardizer = Standardizer().fit(flat_context_pool[context_idx])
+                flat_context = flat_standardizer.transform(flat_context_pool[context_idx])
+                flat_test = flat_standardizer.transform(flat_test_raw)
+                baseline_proba = _tabpfn_predict_proba(
+                    X_context=flat_context,
+                    y_context=y_context_pool[context_idx],
+                    X_query=flat_test,
+                    query_chunk_size=query_chunk_size,
+                    device=effective_device,
+                )
+                baseline_metrics = _classification_metrics(y_test, baseline_proba)
+            except RuntimeError as exc:
+                if not _is_cuda_oom(exc):
+                    raise
+                _clear_cuda_cache(effective_device)
+                records.append(
+                    {
+                        "context_size": int(len(context_idx)),
+                        "requested_context_size": int(context_size),
+                        "repeat": int(repeat_idx),
+                        "context_class_counts": context_counts,
+                        "status": "oom",
+                        "error": str(exc).splitlines()[0],
+                    }
+                )
+                size_oom = True
+                break
+
+            record = {
+                "context_size": int(len(context_idx)),
+                "requested_context_size": int(context_size),
+                "repeat": int(repeat_idx),
+                "context_class_counts": context_counts,
+                "status": "ok",
+                "baseline_tabpfn": baseline_metrics,
+                "frozen_encoder_tabpfn": encoded_metrics,
+                "delta": {
+                    key: encoded_metrics[key] - baseline_metrics[key]
+                    for key in encoded_metrics
+                    if key in baseline_metrics
+                },
+            }
+            records.append(record)
+            last_encoded_proba = encoded_proba
+            last_baseline_proba = baseline_proba
+            print(
+                f"{name} context={record['context_size']} repeat={repeat_idx + 1}/{context_repeats}: "
+                f"baseline_auc={baseline_metrics['roc_auc']:.3f}, "
+                f"encoder_auc={encoded_metrics['roc_auc']:.3f}, "
+                f"delta_auc={record['delta']['roc_auc']:.3f}"
+            )
+        if size_oom:
+            break
+
+    successful = [record for record in records if record.get("status") == "ok"]
+    if not successful:
+        raise RuntimeError(f"No context sizes completed for {name}.")
+    summary_records = _largest_context_records(successful)
 
     out = {
-        "frozen_encoder_tabpfn": encoded_metrics,
-        "baseline_tabpfn": baseline_metrics,
-        "delta": {
-            key: encoded_metrics[key] - baseline_metrics[key]
-            for key in encoded_metrics
-            if key in baseline_metrics
-        },
-        "context_size": int(len(context_idx)),
+        "baseline_tabpfn": _mean_metrics(summary_records, "baseline_tabpfn"),
+        "frozen_encoder_tabpfn": _mean_metrics(summary_records, "frozen_encoder_tabpfn"),
+        "delta": _mean_metrics(summary_records, "delta"),
+        "context_size": int(summary_records[0]["context_size"]),
+        "context_split": "val",
+        "context_scan": records,
+        "context_scan_sizes": [int(size) for size in context_sizes],
+        "context_repeats": int(context_repeats),
+        "query_split": "test",
         "query_size": int(len(y_test)),
         "class_names": dataset.metadata.get("label_names", {}),
-        "n_train": int(len(y_train)),
+        "n_train": int(len(dataset.y_train)),
+        "n_context_pool": int(len(y_context_pool)),
         "n_test": int(len(y_test)),
         "n_flat_features": int(dataset.X_train.shape[1]),
-        "n_encoded_features": int(encoded_context.shape[1]),
+        "n_encoded_features": int(encoded_context_pool.shape[1]),
         "source_encoder_classes": (
             None if trained.classes_ is None else [int(label) for label in trained.classes_]
         ),
@@ -96,16 +192,25 @@ def run_encoder_transfer_evaluation(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     save_json(out, output_path / f"{name}_metrics.json")
-    np.save(output_path / f"{name}_frozen_encoder_proba.npy", encoded_proba)
-    np.save(output_path / f"{name}_baseline_proba.npy", baseline_proba)
-    if str(effective_device).startswith("cuda"):
-        torch_mod, _ = require_torch()
-        if torch_mod.cuda.is_available():
-            torch_mod.cuda.empty_cache()
+    save_json(records, output_path / f"{name}_context_scan_metrics.json")
+    _save_scan_csv(records, output_path / f"{name}_context_scan_metrics.csv")
+    _save_scan_plots(records, output_path, name)
+    if last_encoded_proba is not None:
+        np.save(output_path / f"{name}_frozen_encoder_proba.npy", last_encoded_proba)
+    if last_baseline_proba is not None:
+        np.save(output_path / f"{name}_baseline_proba.npy", last_baseline_proba)
+    _clear_cuda_cache(effective_device)
     return out
 
 
 def print_transfer_summary(name: str, metrics: dict[str, Any]) -> None:
+    if "context_scan" in metrics:
+        n_ok = sum(1 for record in metrics["context_scan"] if record.get("status") == "ok")
+        print(
+            f"{name} context scan: split=val, query=test, "
+            f"completed={n_ok}/{len(metrics['context_scan'])}, "
+            f"summary_context={metrics['context_size']}"
+        )
     for family in ("baseline_tabpfn", "frozen_encoder_tabpfn", "delta"):
         values = metrics[family]
         text = ", ".join(f"{key}={value:.3f}" for key, value in values.items())
@@ -173,6 +278,121 @@ def _classification_metrics(y_true: np.ndarray, proba: np.ndarray) -> dict[str, 
         "log_loss": log_loss(y_true, proba),
         "roc_auc": roc_auc(y_true, proba),
     }
+
+
+def _context_scan_sizes(
+    y_context: np.ndarray,
+    *,
+    min_per_class: int,
+    n_points: int,
+    max_context_size: int | None,
+) -> list[int]:
+    y_context = np.asarray(y_context)
+    if len(y_context) == 0:
+        raise ValueError("Context split is empty.")
+    classes = np.unique(y_context)
+    n_classes = max(1, int(len(classes)))
+    max_size = (
+        len(y_context)
+        if max_context_size is None
+        else min(int(max_context_size), len(y_context))
+    )
+    if max_size < n_classes:
+        raise ValueError("max_context_size must be at least the number of classes.")
+    min_size = min(max_size, max(n_classes, int(min_per_class) * n_classes))
+    if n_points <= 1 or min_size == max_size:
+        return [int(max_size)]
+    raw = np.geomspace(min_size, max_size, num=int(n_points))
+    sizes = sorted({int(round(value)) for value in raw})
+    sizes[0] = int(min_size)
+    sizes[-1] = int(max_size)
+    return sizes
+
+
+def _class_counts(y: np.ndarray) -> dict[str, int]:
+    classes, counts = np.unique(y, return_counts=True)
+    return {str(int(label)): int(count) for label, count in zip(classes, counts)}
+
+
+def _save_scan_csv(records: list[dict[str, Any]], path: Path) -> None:
+    fieldnames = [
+        "context_size",
+        "requested_context_size",
+        "repeat",
+        "status",
+        "baseline_accuracy",
+        "baseline_log_loss",
+        "baseline_roc_auc",
+        "frozen_encoder_accuracy",
+        "frozen_encoder_log_loss",
+        "frozen_encoder_roc_auc",
+        "delta_accuracy",
+        "delta_log_loss",
+        "delta_roc_auc",
+        "error",
+    ]
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            writer.writerow(_scan_csv_row(record))
+
+
+def _scan_csv_row(record: dict[str, Any]) -> dict[str, Any]:
+    baseline = record.get("baseline_tabpfn", {})
+    frozen = record.get("frozen_encoder_tabpfn", {})
+    delta = record.get("delta", {})
+    return {
+        "context_size": record.get("context_size"),
+        "requested_context_size": record.get("requested_context_size"),
+        "repeat": record.get("repeat"),
+        "status": record.get("status"),
+        "baseline_accuracy": baseline.get("accuracy"),
+        "baseline_log_loss": baseline.get("log_loss"),
+        "baseline_roc_auc": baseline.get("roc_auc"),
+        "frozen_encoder_accuracy": frozen.get("accuracy"),
+        "frozen_encoder_log_loss": frozen.get("log_loss"),
+        "frozen_encoder_roc_auc": frozen.get("roc_auc"),
+        "delta_accuracy": delta.get("accuracy"),
+        "delta_log_loss": delta.get("log_loss"),
+        "delta_roc_auc": delta.get("roc_auc"),
+        "error": record.get("error"),
+    }
+
+
+def _save_scan_plots(records: list[dict[str, Any]], output_dir: Path, name: str) -> None:
+    try:
+        from tabpfn_feature_encoder.evaluation.plots import save_context_scan_plots
+
+        save_context_scan_plots(records, output_dir=output_dir, prefix=name)
+    except ImportError:
+        return
+
+
+def _largest_context_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    max_context = max(int(record["context_size"]) for record in records)
+    return [record for record in records if int(record["context_size"]) == max_context]
+
+
+def _mean_metrics(records: list[dict[str, Any]], family: str) -> dict[str, float]:
+    metrics = records[0][family].keys()
+    out: dict[str, float] = {}
+    for metric in metrics:
+        values = [float(record[family][metric]) for record in records]
+        out[metric] = float(np.mean(values))
+    return out
+
+
+def _is_cuda_oom(exc: RuntimeError) -> bool:
+    text = str(exc).lower()
+    return "cuda" in text and "out of memory" in text
+
+
+def _clear_cuda_cache(device: str) -> None:
+    if str(device).startswith("cuda"):
+        torch_mod, _ = require_torch()
+        if torch_mod.cuda.is_available():
+            torch_mod.cuda.empty_cache()
 
 
 def _effective_device(device: str) -> str:
