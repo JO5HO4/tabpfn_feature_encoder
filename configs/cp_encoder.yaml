@@ -1,0 +1,57 @@
+output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/cp_encoder_general_gnn
+cache_dir: /pscratch/sd/j/joshuaho/tabpfn
+seed: 42
+device: cuda
+
+encoder:
+  type: gnn
+  layers: 3
+  hidden_dim: 128
+  output_dim: 128
+  epochs: 20
+  learning_rate: 0.00005
+  batch_size: 2048
+  support_query_ratio: 0.5
+  residual_scale: 0.1
+  identity_weight: 0.0
+  grad_clip_norm: 0.1
+  early_stopping_patience: 8
+  min_delta: 0.001
+
+dataset:
+  raw_dir: /global/cfs/projectdirs/atlas/joshua/gnn_data/stats_100K
+  split: {train: 0.5, val: 0.25, test: 0.25}
+  labels:
+    - label: 0
+      files: [ttH_NLO.root]
+    - label: 1
+      files: [ttH_CPodd.root]
+  padding: zero
+  scalars: [MET_met, MET_phi]
+  particles:
+    - name: jet
+      max: 10
+      branches: [jet_pt, jet_eta, jet_phi, jet_btag]
+    - name: electron
+      max: 3
+      branches: [ele_pt, ele_eta, ele_phi, ele_charge]
+    - name: muon
+      max: 3
+      branches: [mu_pt, mu_eta, mu_phi, mu_charge]
+    - name: photon
+      max: 2
+      branches: [ph_pt, ph_eta, ph_phi]
+
+transfer:
+  raw_dir: /global/cfs/projectdirs/atlas/haichen/opendata/GamGam_data
+  output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/gamgam_transfer
+  tree_name: mini
+  context_size: 1024
+  query_chunk_size: 1024
+  split: {train: 0.5, val: 0.25, test: 0.25}
+  labels:
+    - {label: 0, name: ttH, files: [mc_341081.ttH125_gamgam.GamGam.root]}
+    - {label: 1, name: ggF, files: [mc_343981.ggH125_gamgam.GamGam.root]}
+    - {label: 2, name: VBF, files: [mc_345041.VBFH125_gamgam.GamGam.root]}
+    - {label: 3, name: WH, files: [mc_345318.WpH125J_Wincl_gamgam.GamGam.root]}
+    - {label: 4, name: ZH, files: [mc_345319.ZH125J_Zincl_gamgam.GamGam.root]}
