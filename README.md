@@ -278,6 +278,21 @@ Equivalent direct CLI:
 tabpfn-encoder-train train --config configs/cp_encoder.yaml
 ```
 
+## Nominal Benchmark
+
+Each training run now finishes with held-out test metrics for three comparisons
+on the same 50/25/25 split:
+
+1. `baseline_tabpfn`: TabPFN on the standardized flat ROOT features.
+2. `encoder_tabpfn`: the trained encoder output sent into TabPFN.
+3. `encoder_only_classifier`: the same encoder architecture and hyperparameters
+   trained directly with a linear classifier head, without TabPFN.
+
+The two TabPFN comparisons use the same stratified train-context sample. By
+default, that context is the support side of one training batch, so
+`batch_size: 2048` and `support_query_ratio: 0.5` gives a 1024-event context and
+1024-event test query chunks.
+
 ## Transfer Evaluation
 
 The transfer workflow freezes the CP-trained GNN encoder and evaluates whether
@@ -335,6 +350,13 @@ epoch 1/20: train_loss=..., train_accuracy=..., train_roc_auc=..., batches=49/49
 epoch 1/20 val: context=1024, query=48976, val_log_loss=..., val_accuracy=..., val_roc_auc=..., val_p1_mean=..., val_p1_std=...
 restored best encoder after epoch 1 (best_val_roc_auc=...)
 early stopping: no validation AUC improvement for 8 epochs
+Encoder-only classifier settings: type=gnn, device=cuda, layers=3, hidden_dim=128, output_dim=128, batch_size=2048
+encoder_only epoch 1/20: train_loss=..., train_accuracy=..., train_roc_auc=..., batches=49/49, val_loss=..., val_accuracy=..., val_roc_auc=...
+Nominal benchmark test metrics:
+baseline_tabpfn: test_accuracy=..., test_roc_auc=..., test_log_loss=...
+encoder_tabpfn: test_accuracy=..., test_roc_auc=..., test_log_loss=...
+encoder_only_classifier: test_accuracy=..., test_roc_auc=..., test_log_loss=...
+benchmark setup: context=1024, query_chunk=1024, test=50000
 ```
 
 Metrics are printed to three decimal places in the terminal. Saved CSV/JSON files
@@ -359,10 +381,16 @@ epoch_metrics.csv
 encoder_tabpfn.pkl
 encoder_best_val_auc.pkl
 best_checkpoint.json
+benchmark_metrics.json
+benchmark_baseline_tabpfn_proba.npy
+benchmark_encoder_tabpfn_proba.npy
+benchmark_encoder_only_proba.npy
 ```
 
 `epoch_metrics.csv` is the easiest file to inspect during development. It contains
 one row per epoch with train loss/accuracy/AUC and validation loss/accuracy/AUC.
+`benchmark_metrics.json` is the final test comparison table and should be the
+primary file for reporting nominal CP performance.
 The saved `encoder_best_val_auc.pkl` is the checkpoint to load for transfer: it
 contains the epoch with the highest validation AUC. `encoder_tabpfn.pkl` is kept
 as the default final model artifact and is also restored to the best validation

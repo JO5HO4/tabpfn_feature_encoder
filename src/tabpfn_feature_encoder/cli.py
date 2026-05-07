@@ -9,6 +9,10 @@ import pandas as pd
 from tabpfn_feature_encoder.config import load_project_config
 from tabpfn_feature_encoder.data.atlas_root import build_default_cp_dataset
 from tabpfn_feature_encoder.data.gamgam_root import build_gamgam_dataset
+from tabpfn_feature_encoder.evaluation.benchmark import (
+    print_benchmark_summary,
+    run_nominal_benchmarks,
+)
 from tabpfn_feature_encoder.evaluation.transfer import run_gnn_transfer_evaluation
 from tabpfn_feature_encoder.training.artifacts import save_training_artifacts
 from tabpfn_feature_encoder.training.trainer import EncoderTabPFNClassifier
@@ -54,7 +58,14 @@ def run_train(config_path: Path) -> None:
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     save_json({"config_path": str(config_path)}, cfg.output_dir / "run_metadata.json")
 
-    use_graph_encoder = cfg.encoder.type.lower() in {"gnn", "graph", "graph_gnn"}
+    use_graph_encoder = cfg.encoder.type.lower() in {
+        "gnn",
+        "graph",
+        "graph_gnn",
+        "transformer",
+        "particle_transformer",
+        "graph_transformer",
+    }
     cache_dir = _cache_subdir(cfg.cache_dir, "cp_encoder")
     dataset = build_default_cp_dataset(
         random_state=cfg.seed,
@@ -78,8 +89,20 @@ def run_train(config_path: Path) -> None:
         y_eval=dataset.y_val,
         eval_metrics=cfg.metrics,
     )
+    benchmark_results = run_nominal_benchmarks(
+        dataset=dataset,
+        trained_model=model,
+        encoder_config=cfg.encoder,
+        output_dir=cfg.output_dir,
+        device=cfg.device,
+        random_state=cfg.seed,
+    )
+    print_benchmark_summary(benchmark_results)
 
     metrics = {f"val_{key}": value for key, value in (model.latest_evaluation_ or {}).items()}
+    for family in ("baseline_tabpfn", "encoder_tabpfn", "encoder_only_classifier"):
+        for metric_name, metric_value in benchmark_results[family].items():
+            metrics[f"test_{family}_{metric_name}"] = metric_value
     metrics.update(
         {
             "n_train": int(len(dataset.y_train)),

@@ -408,6 +408,32 @@ class EncoderTabPFNClassifier:
     def predict(self, X: Any) -> np.ndarray:
         return np.argmax(self.predict_proba(X), axis=1)
 
+    def predict_proba_with_context(
+        self,
+        X_context: Any,
+        y_context: Any,
+        X_query: Any,
+        *,
+        query_chunk_size: int | None = None,
+    ) -> np.ndarray:
+        if isinstance(self.X_train_, EventGraphDataset):
+            if not isinstance(X_context, EventGraphDataset) or not isinstance(
+                X_query,
+                EventGraphDataset,
+            ):
+                raise TypeError("This model was trained on graph inputs.")
+            X_context_std = self.graph_standardizer_.transform(X_context)
+            X_query_std = self.graph_standardizer_.transform(X_query)
+        else:
+            X_context_std = self.standardizer_.transform(to_numpy_matrix(X_context))
+            X_query_std = self.standardizer_.transform(to_numpy_matrix(X_query))
+        return self._predict_proba_with_context(
+            X_context_std=X_context_std,
+            y_context=to_label_vector(y_context),
+            X_query_std=X_query_std,
+            query_chunk_size=query_chunk_size,
+        )
+
     def get_training_summary(self) -> dict[str, Any]:
         summary: dict[str, Any] = {
             "encoder": asdict(self.encoder),
@@ -612,9 +638,9 @@ class EncoderTabPFNClassifier:
 
     def _predict_proba_with_context(
         self,
-        X_context_std: np.ndarray,
+        X_context_std: Any,
         y_context: np.ndarray,
-        X_query_std: np.ndarray,
+        X_query_std: Any,
         query_chunk_size: int | None = None,
     ) -> np.ndarray:
         torch_mod, _ = require_torch()

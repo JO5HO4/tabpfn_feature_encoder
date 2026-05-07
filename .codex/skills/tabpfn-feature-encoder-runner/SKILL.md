@@ -56,9 +56,13 @@ find src -maxdepth 2 -type d -name '*.egg-info' -prune -exec rm -rf {} +
 Training saves:
 
 - `metrics.json`
+- `benchmark_metrics.json`
 - `training_summary.json`
 - `epoch_metrics.csv`
 - `encoder_tabpfn.pkl`
 - `run_metadata.json`
+- `benchmark_baseline_tabpfn_proba.npy`
+- `benchmark_encoder_tabpfn_proba.npy`
+- `benchmark_encoder_only_proba.npy`
 
 Terminal metrics print to three decimals; CSV/JSON keep full precision.
