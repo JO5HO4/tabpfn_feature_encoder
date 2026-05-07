@@ -41,6 +41,14 @@ The runner falls back to `conda run --no-capture-output -n tabpfn` if the consol
 - Reruns CP even/odd transfer from a checkpoint with: `bash scripts/run_cp_transfer.sh`.
 - Reruns open-data transfer from a checkpoint with: `bash scripts/run_gamgam_transfer.sh`.
 
+## Model Layout
+
+- Keep distinct encoder definitions in separate files under `src/tabpfn_feature_encoder/models/`.
+- Current modules: `mlp.py`, `feature_gate.py`, `feature_mixer.py`, `gnn.py`, `transformer.py`.
+- Keep model selection in `models/factory.py`.
+- Keep PyTorch import helpers in `models/torch_utils.py`.
+- Leave `models/encoders.py` as a compatibility re-export layer, not the place for new model logic.
+
 ## Validation Commands
 
 Prefer these before finalizing code changes:
