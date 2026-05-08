@@ -25,6 +25,7 @@ class EncoderConfig:
     many_class_redundancy: int = 4
     tabpfn_max_classes: int = 10
     validation_episodes: int = 8
+    detach_support_gradients: bool = True
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> EncoderConfig:
@@ -38,6 +39,7 @@ class EncoderConfig:
         many_class_redundancy = int(payload.get("many_class_redundancy", 4))
         tabpfn_max_classes = int(payload.get("tabpfn_max_classes", 10))
         validation_episodes = int(payload.get("validation_episodes", 8))
+        detach_support_gradients = bool(payload.get("detach_support_gradients", True))
         if not 0.0 < support_query_ratio < 1.0:
             raise ValueError("encoder.support_query_ratio must be between 0 and 1.")
         if attention_heads <= 0:
@@ -73,6 +75,7 @@ class EncoderConfig:
             many_class_redundancy=many_class_redundancy,
             tabpfn_max_classes=tabpfn_max_classes,
             validation_episodes=validation_episodes,
+            detach_support_gradients=detach_support_gradients,
         )
 
 

@@ -32,6 +32,9 @@ For the current config, `output_dim: 72` matches the feature count.
 - Source training uses `batch_size: 2048` support/query episodes.
 - Episodes use a 50/50 support/query split from original 12-class-balanced samples,
   then apply the current ECOC column labels.
+- Support embeddings are detached before fitting the TabPFN prompt by default;
+  query gradients still train the shared encoder as examples rotate through
+  query roles.
 - Validation uses `encoder.validation_episodes` rotating validation support/query
   episodes for early stopping, then decodes ECOC probabilities back to 12 classes.
 - CP even/odd and open-data generalization use TabPFN after source training.
@@ -55,6 +58,8 @@ First checks:
   intended config.
 - Inspect epoch `grad_norm_mean` and `grad_norm_max`. Tiny values suggest dead
   or over-clipped encoder updates.
+- Inspect `skipped_nonfinite_updates`. Nonzero values mean TabPFN backprop
+  produced NaN/inf encoder gradients and those optimizer steps were skipped.
 - Inspect `cp_generalization/*_proba.npy` or transfer probability outputs.
 
 The trainer currently stabilizes updates with:
@@ -65,6 +70,8 @@ The trainer currently stabilizes updates with:
 - original-class-balanced support/query sampling
 - episodic validation
 - seeded TabPFN prompts
+- detached support-prompt gradients
+- skipped optimizer steps for non-finite gradients
 - gradient clipping at `max_norm=1.0`
 
 ## CUDA OOM

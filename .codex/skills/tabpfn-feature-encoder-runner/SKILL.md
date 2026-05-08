@@ -75,9 +75,13 @@ The runner falls back to `conda run --no-capture-output -n tabpfn` if the consol
   `encoder.tabpfn_max_classes: 2`, `encoder.many_class_redundancy: 4`.
 - Default source configs use `output_dim: 72`, `learning_rate: 0.0002`,
   `grad_clip_norm: 1.0`, and `validation_episodes: 8`.
+- Source embeddings are detached before fitting the TabPFN support prompt by
+  default (`detach_support_gradients: true`) so the encoder learns from query
+  gradients without differentiating through prompt construction.
 - Validation is episodic and rotates through validation support/query contexts
   using the same 50/50 support/query split as training.
-- Epoch logs should include `grad_norm_mean` and `grad_norm_max`.
+- Epoch logs should include `grad_norm_mean`, `grad_norm_max`, and
+  `skipped_nonfinite_updates`.
 
 ## Validation Commands
 

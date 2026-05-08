@@ -27,6 +27,7 @@ class EncoderClassifierEpoch:
     val_roc_auc: float | None
     train_grad_norm_mean: float | None
     train_grad_norm_max: float | None
+    skipped_nonfinite_updates: int
     batches: int
 
 
@@ -144,6 +145,7 @@ class EncoderOnlyClassifier:
             f"batch_size={batch_size}, support_query_ratio={self.encoder.support_query_ratio}, "
             f"learning_rate={self.encoder.learning_rate}, grad_clip_norm={self.encoder.grad_clip_norm}, "
             f"validation_episodes={self.encoder.validation_episodes}, "
+            f"detach_support_gradients={self.encoder.detach_support_gradients}, "
             f"{task_text}"
         )
 
@@ -153,6 +155,7 @@ class EncoderOnlyClassifier:
             grad_norms: list[float] = []
             y_parts: list[np.ndarray] = []
             proba_parts: list[np.ndarray] = []
+            skipped_nonfinite_updates = 0
 
             self.encoder_model_.train()
             for batch_idx in range(n_batches):
@@ -173,17 +176,40 @@ class EncoderOnlyClassifier:
                 tabpfn.clear_prompt()
                 z_support = self.encoder_model_(self._model_input(X_model, support_idx, device))
                 z_query = self.encoder_model_(self._model_input(X_model, query_idx, device))
-                tabpfn.fit_prompt(z_support, y_support)
+                z_support_prompt = (
+                    z_support.detach() if self.encoder.detach_support_gradients else z_support
+                )
+                tabpfn.fit_prompt(z_support_prompt, y_support)
                 logits = tabpfn.forward_logits(z_query).float()
                 loss = torch_mod.nn.functional.cross_entropy(logits, y_query)
                 loss.backward()
-                grad_norms.append(self._grad_norm(self.encoder_model_))
-                if self.encoder.grad_clip_norm > 0.0:
-                    torch_mod.nn.utils.clip_grad_norm_(
-                        self.encoder_model_.parameters(),
-                        max_norm=self.encoder.grad_clip_norm,
-                    )
-                optimizer.step()
+                grad_norm = self._grad_norm(self.encoder_model_)
+                if np.isfinite(grad_norm):
+                    grad_norms.append(grad_norm)
+                    if self.encoder.grad_clip_norm > 0.0:
+                        torch_mod.nn.utils.clip_grad_norm_(
+                            self.encoder_model_.parameters(),
+                            max_norm=self.encoder.grad_clip_norm,
+                            error_if_nonfinite=True,
+                        )
+                    optimizer.step()
+                else:
+                    skipped_nonfinite_updates += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    tabpfn.clear_prompt()
+                    if skipped_nonfinite_updates <= 3:
+                        print(
+                            "encoder_tabpfn warning: skipped optimizer step due to "
+                            f"non-finite gradient norm at epoch={epoch_idx + 1}, "
+                            f"batch={batch_idx + 1}/{n_batches}",
+                            flush=True,
+                        )
+                    elif skipped_nonfinite_updates == 4:
+                        print(
+                            "encoder_tabpfn warning: suppressing further non-finite "
+                            "gradient skip messages for this epoch.",
+                            flush=True,
+                        )
 
                 proba = torch_mod.softmax(logits.detach(), dim=1).cpu().numpy()
                 losses.append(float(loss.detach().cpu().item()))
@@ -240,6 +266,7 @@ class EncoderOnlyClassifier:
                     train_grad_norm_max=(
                         float(np.max(grad_norms)) if grad_norms else None
                     ),
+                    skipped_nonfinite_updates=skipped_nonfinite_updates,
                     batches=len(losses),
                 )
             )
@@ -255,8 +282,9 @@ class EncoderOnlyClassifier:
                 f"train_loss={train_metrics['log_loss']:.3f}, "
                 f"train_accuracy={train_metrics['accuracy']:.3f}, "
                 f"train_roc_auc={train_metrics['roc_auc']:.3f}, "
-                f"grad_norm_mean={np.mean(grad_norms):.3g}, "
-                f"grad_norm_max={np.max(grad_norms):.3g}, "
+                f"grad_norm_mean={np.mean(grad_norms) if grad_norms else float('nan'):.3g}, "
+                f"grad_norm_max={np.max(grad_norms) if grad_norms else float('nan'):.3g}, "
+                f"skipped_nonfinite_updates={skipped_nonfinite_updates}, "
                 f"batches={len(losses)}/{n_batches}{val_text}"
             )
 
@@ -722,14 +750,21 @@ class EncoderOnlyClassifier:
 
     @staticmethod
     def _grad_norm(model: Any) -> float:
+        torch_mod, _ = require_torch()
         if model is None:
             return float("nan")
         total_sq = 0.0
+        seen_grad = False
         for param in model.parameters():
             if param.grad is None:
                 continue
             grad = param.grad.detach()
+            seen_grad = True
+            if not bool(torch_mod.isfinite(grad).all().detach().cpu().item()):
+                return float("nan")
             total_sq += float(grad.norm(2).cpu().item()) ** 2
+        if not seen_grad:
+            return float("nan")
         return float(math.sqrt(total_sq))
 
     @classmethod

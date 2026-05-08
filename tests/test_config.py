@@ -42,6 +42,7 @@ def test_project_config_from_dict() -> None:
                 "early_stopping_patience": 4,
                 "min_delta": 0.002,
                 "validation_episodes": 6,
+                "detach_support_gradients": False,
             },
             "transfer": {
                 "raw_dir": "/tmp/gamgam",
@@ -91,6 +92,7 @@ def test_project_config_from_dict() -> None:
     assert cfg.encoder.early_stopping_patience == 4
     assert cfg.encoder.min_delta == 0.002
     assert cfg.encoder.validation_episodes == 6
+    assert cfg.encoder.detach_support_gradients is False
     assert cfg.transfer.raw_dir == Path("/tmp/gamgam")
     assert cfg.transfer.cache_dir == Path("/tmp/gamgam-cache")
     assert cfg.transfer.output_dir == Path("/tmp/transfer-out")
@@ -118,6 +120,7 @@ def test_encoder_defaults_match_main_training_config() -> None:
     assert cfg.encoder.early_stopping_patience == 8
     assert cfg.encoder.min_delta == 0.001
     assert cfg.encoder.validation_episodes == 8
+    assert cfg.encoder.detach_support_gradients is True
     assert cfg.transfer.context_size is None
     assert cfg.transfer.context_min_per_class == 100
     assert cfg.transfer.context_scan_points == 16
@@ -156,6 +159,7 @@ def test_source_encoder_configs_have_clear_output_names() -> None:
         assert cfg.encoder.grad_clip_norm == 1.0
         assert cfg.encoder.tabpfn_max_classes == 2
         assert cfg.encoder.validation_episodes == 8
+        assert cfg.encoder.detach_support_gradients is True
         assert cfg.transfer.output_dir == cfg.output_dir / "open_data_generalization"
         assert cfg.transfer.context_size is None
         assert cfg.transfer.context_min_per_class == 100

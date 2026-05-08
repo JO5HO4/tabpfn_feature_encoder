@@ -19,6 +19,7 @@ encoder:
   tabpfn_max_classes: 2
   many_class_redundancy: 4
   validation_episodes: 8
+  detach_support_gradients: true
 
 dataset:
   raw_dir: /global/cfs/projectdirs/atlas/joshua/gnn_data/stats_100K
