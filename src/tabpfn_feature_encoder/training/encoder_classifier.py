@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import math
+import os
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 
@@ -14,6 +17,7 @@ from tabpfn_feature_encoder.evaluation.metrics import accuracy, log_loss, roc_au
 from tabpfn_feature_encoder.models.factory import build_encoder
 from tabpfn_feature_encoder.models.tabpfn_adapter import TabPFNPromptAdapter
 from tabpfn_feature_encoder.models.torch_utils import require_torch
+from tabpfn_feature_encoder.utils.io import save_json
 
 
 @dataclass
@@ -65,6 +69,8 @@ class EncoderOnlyClassifier:
         y_train: Any,
         X_val: Any | None = None,
         y_val: Any | None = None,
+        checkpoint_dir: str | Path | None = None,
+        resume: bool = True,
     ) -> EncoderOnlyClassifier:
         torch_mod, _ = require_torch()
         self._seed_everything()
@@ -130,6 +136,47 @@ class EncoderOnlyClassifier:
         self.history_ = []
         self.best_epoch_ = None
         self.latest_evaluation_ = None
+        start_epoch = 0
+        checkpoint_path = None
+        checkpoint_root = None if checkpoint_dir is None else Path(checkpoint_dir)
+        if checkpoint_root is not None:
+            checkpoint_root.mkdir(parents=True, exist_ok=True)
+            checkpoint_path = self._latest_training_checkpoint(checkpoint_root)
+            if resume and checkpoint_path is not None:
+                checkpoint = self._load_training_checkpoint_file(checkpoint_path, device)
+                self._validate_training_checkpoint(
+                    checkpoint,
+                    input_dim=input_dim,
+                    global_dim=global_dim,
+                )
+                self.encoder_model_.load_state_dict(checkpoint["encoder_state"])
+                optimizer.load_state_dict(checkpoint["optimizer_state"])
+                self._set_optimizer_learning_rate(optimizer, self.encoder.learning_rate)
+                best_state = checkpoint.get("best_state")
+                best_val_roc_auc = float(checkpoint.get("best_val_roc_auc", best_val_roc_auc))
+                best_train_loss = float(checkpoint.get("best_train_loss", best_train_loss))
+                epochs_without_improvement = int(
+                    checkpoint.get("epochs_without_improvement", epochs_without_improvement)
+                )
+                self.history_ = [
+                    EncoderClassifierEpoch(**record)
+                    for record in checkpoint.get("history", [])
+                ]
+                self.best_epoch_ = checkpoint.get("best_epoch")
+                self.latest_evaluation_ = checkpoint.get("latest_evaluation")
+                if checkpoint.get("prompt_indices") is not None:
+                    prompt_idx = np.asarray(checkpoint["prompt_indices"], dtype=np.int64)
+                    self.prompt_X_model_ = self._subset_model_input(X_model, prompt_idx)
+                    self.prompt_y_encoded_ = y_encoded[prompt_idx].copy()
+                if checkpoint.get("rng_state") is not None:
+                    rng.bit_generator.state = checkpoint["rng_state"]
+                start_epoch = int(checkpoint.get("epoch", 0))
+                print(
+                    "encoder_tabpfn resumed training checkpoint: "
+                    f"path={checkpoint_path}, completed_epochs={start_epoch}, "
+                    f"target_epochs={self.encoder.epochs}, learning_rate={self.encoder.learning_rate}",
+                    flush=True,
+                )
 
         task_count = self._task_count()
         task_text = (
@@ -150,7 +197,14 @@ class EncoderOnlyClassifier:
         )
 
         n_batches = max(1, int(np.ceil(len(y_np) / batch_size)))
-        for epoch_idx in range(max(1, self.encoder.epochs)):
+        target_epochs = max(1, self.encoder.epochs)
+        if start_epoch >= target_epochs:
+            print(
+                "encoder_tabpfn checkpoint already satisfies requested epochs: "
+                f"completed_epochs={start_epoch}, target_epochs={target_epochs}",
+                flush=True,
+            )
+        for epoch_idx in range(start_epoch, target_epochs):
             losses: list[float] = []
             grad_norms: list[float] = []
             y_parts: list[np.ndarray] = []
@@ -287,6 +341,20 @@ class EncoderOnlyClassifier:
                 f"skipped_nonfinite_updates={skipped_nonfinite_updates}, "
                 f"batches={len(losses)}/{n_batches}{val_text}"
             )
+            if checkpoint_root is not None:
+                self._save_training_checkpoint(
+                    checkpoint_dir=checkpoint_root,
+                    epoch=epoch_idx + 1,
+                    optimizer=optimizer,
+                    best_state=best_state,
+                    best_val_roc_auc=best_val_roc_auc,
+                    best_train_loss=best_train_loss,
+                    epochs_without_improvement=epochs_without_improvement,
+                    rng_state=rng.bit_generator.state,
+                    prompt_indices=prompt_idx,
+                    input_dim=input_dim,
+                    global_dim=global_dim,
+                )
 
             if (
                 X_val_model is not None
@@ -734,6 +802,163 @@ class EncoderOnlyClassifier:
             raise RuntimeError("Classifier has not been fitted.")
         self.encoder_model_.load_state_dict(state["encoder"])
         self.encoder_model_.to(device)
+
+    def _save_training_checkpoint(
+        self,
+        *,
+        checkpoint_dir: Path,
+        epoch: int,
+        optimizer: Any,
+        best_state: dict[str, Any] | None,
+        best_val_roc_auc: float,
+        best_train_loss: float,
+        epochs_without_improvement: int,
+        rng_state: dict[str, Any],
+        prompt_indices: np.ndarray,
+        input_dim: int,
+        global_dim: int,
+    ) -> None:
+        if self.encoder_model_ is None:
+            raise RuntimeError("Classifier has not been fitted.")
+        payload = {
+            "format_version": 1,
+            "epoch": int(epoch),
+            "encoder_config": asdict(self.encoder),
+            "random_state": int(self.random_state),
+            "device": self.device,
+            "input_dim": int(input_dim),
+            "global_dim": int(global_dim),
+            "is_graph_input": bool(self.is_graph_input_),
+            "classes": None if self.classes_ is None else self.classes_.tolist(),
+            "tabpfn_max_classes": int(self.tabpfn_max_classes_),
+            "ecoc_codebook": None
+            if self.ecoc_codebook_ is None
+            else self.ecoc_codebook_.tolist(),
+            "encoder_state": self._module_state_cpu(self.encoder_model_),
+            "optimizer_state": self._to_cpu(optimizer.state_dict()),
+            "best_state": best_state,
+            "best_epoch": self.best_epoch_,
+            "best_val_roc_auc": float(best_val_roc_auc),
+            "best_train_loss": float(best_train_loss),
+            "epochs_without_improvement": int(epochs_without_improvement),
+            "history": [asdict(record) for record in self.history_],
+            "latest_evaluation": self.latest_evaluation_,
+            "rng_state": rng_state,
+            "prompt_indices": np.asarray(prompt_indices, dtype=np.int64),
+        }
+        epoch_path = checkpoint_dir / f"epoch_{int(epoch):04d}.pt"
+        latest_path = checkpoint_dir / "latest.pt"
+        self._atomic_torch_save(payload, epoch_path)
+        self._atomic_torch_save(payload, latest_path)
+        if self.best_epoch_ == int(epoch):
+            self._atomic_torch_save(payload, checkpoint_dir / "best.pt")
+        save_json(
+            {
+                "latest_checkpoint": latest_path,
+                "latest_epoch": int(epoch),
+                "best_checkpoint": checkpoint_dir / "best.pt",
+                "best_epoch": self.best_epoch_,
+                "target_epochs": int(self.encoder.epochs),
+            },
+            checkpoint_dir / "checkpoint_index.json",
+        )
+        print(
+            "encoder_tabpfn saved training checkpoint: "
+            f"{latest_path} (epoch {int(epoch)})",
+            flush=True,
+        )
+
+    def _validate_training_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        *,
+        input_dim: int,
+        global_dim: int,
+    ) -> None:
+        if int(checkpoint.get("input_dim", -1)) != int(input_dim):
+            raise ValueError("Training checkpoint input_dim does not match the current data.")
+        if int(checkpoint.get("global_dim", -1)) != int(global_dim):
+            raise ValueError("Training checkpoint global_dim does not match the current data.")
+        if bool(checkpoint.get("is_graph_input", False)) != bool(self.is_graph_input_):
+            raise ValueError("Training checkpoint input type does not match the current data.")
+        if int(checkpoint.get("random_state", self.random_state)) != int(self.random_state):
+            raise ValueError("Training checkpoint random_state does not match the current config.")
+        saved_classes = checkpoint.get("classes")
+        current_classes = None if self.classes_ is None else self.classes_.tolist()
+        if saved_classes != current_classes:
+            raise ValueError("Training checkpoint classes do not match the current data.")
+        saved_codebook = checkpoint.get("ecoc_codebook")
+        current_codebook = None if self.ecoc_codebook_ is None else self.ecoc_codebook_.tolist()
+        if saved_codebook != current_codebook:
+            raise ValueError("Training checkpoint ECOC codebook does not match current config.")
+        saved_encoder = checkpoint.get("encoder_config", {})
+        for key in (
+            "type",
+            "layers",
+            "hidden_dim",
+            "attention_heads",
+            "output_dim",
+            "residual_scale",
+            "tabpfn_max_classes",
+            "many_class_redundancy",
+            "detach_support_gradients",
+        ):
+            if saved_encoder.get(key) != asdict(self.encoder).get(key):
+                raise ValueError(
+                    "Training checkpoint encoder architecture/objective does not match "
+                    f"current config key: encoder.{key}"
+                )
+
+    @classmethod
+    def _latest_training_checkpoint(cls, checkpoint_dir: Path) -> Path | None:
+        latest = checkpoint_dir / "latest.pt"
+        if latest.exists():
+            return latest
+        epoch_paths = sorted(checkpoint_dir.glob("epoch_*.pt"))
+        return epoch_paths[-1] if epoch_paths else None
+
+    @classmethod
+    def _load_training_checkpoint_file(cls, path: Path, device: str) -> dict[str, Any]:
+        torch_mod, _ = require_torch()
+        try:
+            return torch_mod.load(path, map_location=device, weights_only=False)
+        except TypeError:
+            return torch_mod.load(path, map_location=device)
+
+    @classmethod
+    def _atomic_torch_save(cls, payload: dict[str, Any], path: Path) -> None:
+        torch_mod, _ = require_torch()
+        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            torch_mod.save(payload, tmp_path)
+            os.replace(tmp_path, path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    @classmethod
+    def _module_state_cpu(cls, model: Any) -> dict[str, Any]:
+        return {
+            name: param.detach().cpu().clone()
+            for name, param in model.state_dict().items()
+        }
+
+    @classmethod
+    def _to_cpu(cls, value: Any) -> Any:
+        torch_mod, _ = require_torch()
+        if torch_mod.is_tensor(value):
+            return value.detach().cpu().clone()
+        if isinstance(value, dict):
+            return {key: cls._to_cpu(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._to_cpu(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._to_cpu(item) for item in value)
+        return value
+
+    @staticmethod
+    def _set_optimizer_learning_rate(optimizer: Any, learning_rate: float) -> None:
+        for group in optimizer.param_groups:
+            group["lr"] = float(learning_rate)
 
     def _infer_tabpfn_max_classes(self, tabpfn: TabPFNPromptAdapter) -> int:
         model_limit = getattr(tabpfn.model, "max_num_classes_", None)

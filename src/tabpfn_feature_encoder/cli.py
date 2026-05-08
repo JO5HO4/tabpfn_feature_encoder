@@ -113,7 +113,10 @@ def run_train(config_path: Path) -> None:
     cfg = load_project_config(config_path)
     set_global_seed(cfg.seed)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    save_json({"config_path": str(config_path)}, cfg.output_dir / "run_metadata.json")
+    save_json(
+        {"config_path": str(config_path), "train_dir": cfg.train_dir},
+        cfg.output_dir / "run_metadata.json",
+    )
     _log_progress(
         "Starting full train/evaluate workflow: "
         f"config={config_path}, output_dir={cfg.output_dir}, "
@@ -160,6 +163,8 @@ def run_train(config_path: Path) -> None:
         dataset.y_train,
         X_val=X_val,
         y_val=dataset.y_val,
+        checkpoint_dir=cfg.train_dir,
+        resume=True,
     )
     source_val_metrics = model.evaluate(X_val, dataset.y_val)
     X_test = dataset.graph_test if use_graph_encoder else dataset.X_test
@@ -174,6 +179,23 @@ def run_train(config_path: Path) -> None:
     print(
         "source_12_class test: "
         + ", ".join(f"{key}={value:.3f}" for key, value in source_test_metrics.items())
+    )
+    source_metrics = _source_training_metrics(
+        cfg=cfg,
+        model=model,
+        dataset=dataset,
+        source_val_metrics=source_val_metrics,
+        source_test_metrics=source_test_metrics,
+        use_graph_encoder=use_graph_encoder,
+    )
+    _log_progress(
+        "Saving reusable source encoder checkpoint before long generalization scans."
+    )
+    _save_encoder_artifacts(
+        cfg=cfg,
+        model=model,
+        metrics=source_metrics,
+        checkpoint_note="source_training_complete",
     )
 
     _log_progress("Stage 3/6 running source 12-class TabPFN context scan.")
@@ -194,11 +216,7 @@ def run_train(config_path: Path) -> None:
         model=model,
     )
 
-    metrics = {}
-    for metric_name, metric_value in source_val_metrics.items():
-        metrics[f"source_val_{metric_name}"] = metric_value
-    for metric_name, metric_value in source_test_metrics.items():
-        metrics[f"source_test_{metric_name}"] = metric_value
+    metrics = dict(source_metrics)
     for family in ("baseline_tabpfn", "frozen_encoder_tabpfn", "delta"):
         for metric_name, metric_value in source_generalization[family].items():
             metrics[f"source_generalization_{family}_{metric_name}"] = metric_value
@@ -206,6 +224,36 @@ def run_train(config_path: Path) -> None:
             metrics[f"cp_generalization_{family}_{metric_name}"] = metric_value
         for metric_name, metric_value in open_data_generalization[family].items():
             metrics[f"open_data_generalization_{family}_{metric_name}"] = metric_value
+    for key, value in metrics.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.3f}")
+        else:
+            print(f"{key}: {value}")
+
+    _log_progress("Stage 6/6 saving model and metric artifacts.")
+    _save_encoder_artifacts(
+        cfg=cfg,
+        model=model,
+        metrics=metrics,
+        checkpoint_note="full_workflow_complete",
+    )
+    _log_progress("Full train/evaluate workflow finished.")
+
+
+def _source_training_metrics(
+    *,
+    cfg: Any,
+    model: EncoderOnlyClassifier,
+    dataset: Any,
+    source_val_metrics: dict[str, float],
+    source_test_metrics: dict[str, float],
+    use_graph_encoder: bool,
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    for metric_name, metric_value in source_val_metrics.items():
+        metrics[f"source_val_{metric_name}"] = metric_value
+    for metric_name, metric_value in source_test_metrics.items():
+        metrics[f"source_test_{metric_name}"] = metric_value
     metrics.update(
         {
             "n_train": int(len(dataset.y_train)),
@@ -218,6 +266,7 @@ def run_train(config_path: Path) -> None:
             "n_flat_features": int(dataset.X_train.shape[1]),
             "n_tabpfn_features": int(cfg.encoder.output_dim),
             "trainable_encoder_params": model._count_trainable_parameters(model.encoder_model_),
+            "train_dir": cfg.train_dir,
         }
     )
     if use_graph_encoder and dataset.graph_train is not None:
@@ -225,19 +274,24 @@ def run_train(config_path: Path) -> None:
         metrics["n_global_features"] = int(dataset.graph_train.global_dim)
     if model.best_epoch_ is not None:
         metrics["best_epoch"] = int(model.best_epoch_)
-    for key, value in metrics.items():
-        if isinstance(value, float):
-            print(f"{key}: {value:.3f}")
-        else:
-            print(f"{key}: {value}")
+    return metrics
 
-    _log_progress("Stage 6/6 saving model and metric artifacts.")
+
+def _save_encoder_artifacts(
+    *,
+    cfg: Any,
+    model: EncoderOnlyClassifier,
+    metrics: dict[str, Any],
+    checkpoint_note: str,
+) -> dict[str, Path]:
     model.prepare_for_serialization()
     best_checkpoint_path = cfg.output_dir / "encoder_classifier.pkl"
     save_pickle(model, best_checkpoint_path)
     save_json(
         {
             "checkpoint": best_checkpoint_path,
+            "train_dir": cfg.train_dir,
+            "checkpoint_note": checkpoint_note,
             "best_epoch": model.best_epoch_,
             "source_val_roc_auc": metrics.get("source_val_roc_auc"),
             "source_val_accuracy": metrics.get("source_val_accuracy"),
@@ -267,7 +321,7 @@ def run_train(config_path: Path) -> None:
     saved["best_checkpoint_metadata"] = cfg.output_dir / "best_checkpoint.json"
     for name, path in saved.items():
         print(f"saved {name}: {path}")
-    _log_progress("Full train/evaluate workflow finished.")
+    return saved
 
 
 def run_source_transfer(config_path: Path, model_path: Path | None = None) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,26 @@ def run_encoder_context_scan_evaluation(
         n_points=context_scan_points,
         max_context_size=max_context_size,
     )
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    records_path = output_path / f"{name}_context_scan_metrics.json"
+    expected_keys = {
+        (int(size), int(repeat_idx))
+        for size in context_sizes
+        for repeat_idx in range(int(context_repeats))
+    }
+    loaded_records = _load_scan_records(records_path)
+    records = [
+        record
+        for record in loaded_records
+        if _scan_record_key(record) in expected_keys
+    ]
+    ignored_records = len(loaded_records) - len(records)
+    completed_keys = {
+        _scan_record_key(record)
+        for record in records
+        if record.get("status") == "ok"
+    }
 
     print(
         f"{name} context scan setup: "
@@ -77,6 +98,18 @@ def run_encoder_context_scan_evaluation(
         f"device={effective_device}",
         flush=True,
     )
+    if records:
+        print(
+            f"{name} loaded {len(records)} existing context-scan record(s); "
+            f"{len(completed_keys)} completed repeat(s) will be skipped.",
+            flush=True,
+        )
+    if ignored_records:
+        print(
+            f"{name} ignored {ignored_records} existing context-scan record(s) "
+            "outside the current scan grid.",
+            flush=True,
+        )
     print(f"{name} encoding frozen-encoder validation and test features...", flush=True)
     encoded_context_pool = _encode_subset(
         trained=trained,
@@ -100,7 +133,6 @@ def run_encoder_context_scan_evaluation(
     flat_context_pool = dataset.X_val.to_numpy(dtype=np.float32)
     flat_test_raw = dataset.X_test.to_numpy(dtype=np.float32)
 
-    records: list[dict[str, Any]] = []
     last_encoded_proba: np.ndarray | None = None
     last_baseline_proba: np.ndarray | None = None
     for scan_idx, context_size in enumerate(context_sizes):
@@ -111,6 +143,14 @@ def run_encoder_context_scan_evaluation(
             flush=True,
         )
         for repeat_idx in range(int(context_repeats)):
+            record_key = (int(context_size), int(repeat_idx))
+            if record_key in completed_keys:
+                print(
+                    f"{name} context={int(context_size)} repeat={repeat_idx + 1}/"
+                    f"{context_repeats}: already complete; skipping.",
+                    flush=True,
+                )
+                continue
             context_idx = stratified_sample_indices(
                 y_context_pool,
                 n_samples=int(context_size),
@@ -147,7 +187,8 @@ def run_encoder_context_scan_evaluation(
                 if not _is_cuda_oom(exc):
                     raise
                 _clear_cuda_cache(effective_device)
-                records.append(
+                _upsert_scan_record(
+                    records,
                     {
                         "context_size": int(len(context_idx)),
                         "requested_context_size": int(context_size),
@@ -155,7 +196,19 @@ def run_encoder_context_scan_evaluation(
                         "context_class_counts": context_counts,
                         "status": "oom",
                         "error": str(exc).splitlines()[0],
-                    }
+                    },
+                )
+                _save_context_scan_artifacts(
+                    records=records,
+                    output_path=output_path,
+                    name=name,
+                    context_sizes=context_sizes,
+                    context_repeats=context_repeats,
+                    y_test=y_test,
+                    dataset=dataset,
+                    encoded_feature_count=int(encoded_context_pool.shape[1]),
+                    trained=trained,
+                    save_plots=False,
                 )
                 size_oom = True
                 break
@@ -174,7 +227,8 @@ def run_encoder_context_scan_evaluation(
                     if key in baseline_metrics
                 },
             }
-            records.append(record)
+            _upsert_scan_record(records, record)
+            completed_keys.add(record_key)
             last_encoded_proba = encoded_proba
             last_baseline_proba = baseline_proba
             print(
@@ -184,48 +238,145 @@ def run_encoder_context_scan_evaluation(
                 f"delta_auc={record['delta']['roc_auc']:.3f}",
                 flush=True,
             )
+            _save_context_scan_artifacts(
+                records=records,
+                output_path=output_path,
+                name=name,
+                context_sizes=context_sizes,
+                context_repeats=context_repeats,
+                y_test=y_test,
+                dataset=dataset,
+                encoded_feature_count=int(encoded_context_pool.shape[1]),
+                trained=trained,
+                save_plots=False,
+            )
         if size_oom:
             break
 
-    successful = [record for record in records if record.get("status") == "ok"]
-    if not successful:
+    out = _save_context_scan_artifacts(
+        records=records,
+        output_path=output_path,
+        name=name,
+        context_sizes=context_sizes,
+        context_repeats=context_repeats,
+        y_test=y_test,
+        dataset=dataset,
+        encoded_feature_count=int(encoded_context_pool.shape[1]),
+        trained=trained,
+        save_plots=True,
+    )
+    if not [record for record in records if record.get("status") == "ok"]:
         raise RuntimeError(f"No context sizes completed for {name}.")
-    summary_records = _largest_context_records(successful)
-
-    out = {
-        "baseline_tabpfn": _mean_metrics(summary_records, "baseline_tabpfn"),
-        "frozen_encoder_tabpfn": _mean_metrics(summary_records, "frozen_encoder_tabpfn"),
-        "delta": _mean_metrics(summary_records, "delta"),
-        "context_size": int(summary_records[0]["context_size"]),
-        "context_split": "val",
-        "context_scan": records,
-        "context_scan_sizes": [int(size) for size in context_sizes],
-        "context_repeats": int(context_repeats),
-        "query_split": "test",
-        "query_size": int(len(y_test)),
-        "class_names": dataset.metadata.get("label_names", {}),
-        "n_train": int(len(dataset.y_train)),
-        "n_context_pool": int(len(y_context_pool)),
-        "n_test": int(len(y_test)),
-        "n_flat_features": int(dataset.X_train.shape[1]),
-        "n_encoded_features": int(encoded_context_pool.shape[1]),
-        "source_encoder_classes": (
-            None if trained.classes_ is None else [int(label) for label in trained.classes_]
-        ),
-        "task_name": name,
-    }
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    save_json(out, output_path / f"{name}_metrics.json")
-    save_json(records, output_path / f"{name}_context_scan_metrics.json")
-    _save_scan_csv(records, output_path / f"{name}_context_scan_metrics.csv")
-    _save_scan_plots(records, output_path, name)
     print(f"{name} saved context-scan artifacts: {output_path}", flush=True)
     if last_encoded_proba is not None:
         np.save(output_path / f"{name}_frozen_encoder_proba.npy", last_encoded_proba)
     if last_baseline_proba is not None:
         np.save(output_path / f"{name}_baseline_proba.npy", last_baseline_proba)
     _clear_cuda_cache(effective_device)
+    return out
+
+
+def _load_scan_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, list):
+        raise TypeError(f"Context scan record file must contain a list: {path}")
+    return [record for record in payload if isinstance(record, dict)]
+
+
+def _scan_record_key(record: dict[str, Any]) -> tuple[int, int]:
+    return (
+        int(record.get("requested_context_size", record.get("context_size", 0))),
+        int(record.get("repeat", 0)),
+    )
+
+
+def _upsert_scan_record(records: list[dict[str, Any]], record: dict[str, Any]) -> None:
+    key = _scan_record_key(record)
+    for idx, existing in enumerate(records):
+        if _scan_record_key(existing) == key:
+            records[idx] = record
+            return
+    records.append(record)
+
+
+def _ordered_scan_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        records,
+        key=lambda record: (
+            int(record.get("requested_context_size", record.get("context_size", 0))),
+            int(record.get("repeat", 0)),
+        ),
+    )
+
+
+def _save_context_scan_artifacts(
+    *,
+    records: list[dict[str, Any]],
+    output_path: Path,
+    name: str,
+    context_sizes: list[int],
+    context_repeats: int,
+    y_test: np.ndarray,
+    dataset: DatasetBundle,
+    encoded_feature_count: int,
+    trained: EncoderOnlyClassifier,
+    save_plots: bool,
+) -> dict[str, Any]:
+    output_path.mkdir(parents=True, exist_ok=True)
+    ordered_records = _ordered_scan_records(records)
+    successful = [record for record in ordered_records if record.get("status") == "ok"]
+    expected_repeats = int(len(context_sizes) * int(context_repeats))
+    out: dict[str, Any] = {
+        "status": "complete" if len(successful) >= expected_repeats else "incomplete",
+        "completed_repeats": int(len(successful)),
+        "expected_repeats": expected_repeats,
+        "context_split": "val",
+        "context_scan": ordered_records,
+        "context_scan_sizes": [int(size) for size in context_sizes],
+        "context_repeats": int(context_repeats),
+        "query_split": "test",
+        "query_size": int(len(y_test)),
+        "class_names": dataset.metadata.get("label_names", {}),
+        "n_train": int(len(dataset.y_train)),
+        "n_context_pool": int(len(dataset.y_val)),
+        "n_test": int(len(y_test)),
+        "n_flat_features": int(dataset.X_train.shape[1]),
+        "n_encoded_features": int(encoded_feature_count),
+        "source_encoder_classes": (
+            None if trained.classes_ is None else [int(label) for label in trained.classes_]
+        ),
+        "task_name": name,
+    }
+    if successful:
+        summary_records = _largest_context_records(successful)
+        out.update(
+            {
+                "baseline_tabpfn": _mean_metrics(summary_records, "baseline_tabpfn"),
+                "frozen_encoder_tabpfn": _mean_metrics(
+                    summary_records,
+                    "frozen_encoder_tabpfn",
+                ),
+                "delta": _mean_metrics(summary_records, "delta"),
+                "context_size": int(summary_records[0]["context_size"]),
+            }
+        )
+    else:
+        out.update(
+            {
+                "baseline_tabpfn": {},
+                "frozen_encoder_tabpfn": {},
+                "delta": {},
+                "context_size": None,
+            }
+        )
+    save_json(out, output_path / f"{name}_metrics.json")
+    save_json(ordered_records, output_path / f"{name}_context_scan_metrics.json")
+    _save_scan_csv(ordered_records, output_path / f"{name}_context_scan_metrics.csv")
+    if save_plots and successful:
+        _save_scan_plots(ordered_records, output_path, name)
     return out
 
 

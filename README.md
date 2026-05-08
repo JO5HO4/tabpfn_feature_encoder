@@ -402,6 +402,58 @@ bash scripts/run_full_workflow.sh \
   configs/source_transformer.yaml
 ```
 
+## Perlmutter Slurm Jobs
+
+Perlmutter jobs are submitted with Slurm. The helper below generates an sbatch
+script under `runs/slurm_jobs/`, writes Slurm logs under `runs/slurm_logs/`, and
+submits it:
+
+```bash
+NERSC_ACCOUNT=atlas NERSC_QOS=shared NERSC_TIME=12:00:00 \
+  scripts/submit_perlmutter.sh full-workflow
+```
+
+`full-workflow` requests one GPU node, 4 GPUs by default, and runs
+`scripts/run_full_workflow.sh`. The workflow script then assigns one config per
+GPU and streams per-config logs.
+
+To submit independent one-GPU jobs for each encoder config instead:
+
+```bash
+NERSC_ACCOUNT=atlas NERSC_QOS=shared NERSC_TIME=12:00:00 \
+  scripts/submit_perlmutter.sh source-encoders
+```
+
+This submits three separate Slurm jobs by default: residual MLP, GNN, and
+transformer. Each job requests one GPU on one GPU node and runs the full
+train/evaluate workflow for that config.
+
+Perlmutter's shared GPU queue requires 32 CPU cores per requested GPU, so the
+helper defaults to `--cpus-per-task=32` for each one-GPU encoder job.
+
+After `encoder_classifier.pkl` exists, the source, CP, and GamGam transfer scans
+can run together in one 3-GPU job:
+
+```bash
+NERSC_ACCOUNT=atlas NERSC_QOS=shared NERSC_TIME=12:00:00 \
+  scripts/submit_perlmutter.sh transfer-suite configs/source_residual_mlp.yaml
+```
+
+The submission helper defaults to `--account=atlas`, `--qos=shared`,
+`--constraint=gpu`, and `--time=12:00:00`. Override these with environment
+variables:
+
+```bash
+NERSC_ACCOUNT=<project> NERSC_QOS=debug NERSC_TIME=00:30:00 \
+  scripts/submit_perlmutter.sh full-workflow configs/source_gnn.yaml
+```
+
+Use `NERSC_DRY_RUN=1` to write and inspect the sbatch script without submitting:
+
+```bash
+NERSC_DRY_RUN=1 scripts/submit_perlmutter.sh full-workflow
+```
+
 Recommended launcher:
 
 ```bash
@@ -434,6 +486,15 @@ Equivalent direct CLI:
 tabpfn-encoder-train train --config configs/source_residual_mlp.yaml
 ```
 
+Each config has a root-level `train_dir` for resumable training state:
+
+```yaml
+output_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_residual_mlp
+train_dir: /global/cfs/projectdirs/atlas/joshua/tabpfn/runs/source_residual_mlp/training_checkpoints
+```
+
+If `train_dir` is omitted, it defaults to `output_dir/training_checkpoints`.
+
 ## Source Training
 
 The default `train` command trains only encoder weights, but the loss comes from
@@ -448,6 +509,28 @@ error-correcting output-code (ECOC) codebook. Each ECOC column is a balanced
 small-class TabPFN task; losses are averaged over these support/query subtasks
 across training steps, and validation probabilities are decoded back to the
 original source classes from rotating validation support/query episodes.
+
+The trainer writes a resume checkpoint after every epoch into `train_dir`:
+
+```text
+epoch_0001.pt
+epoch_0002.pt
+latest.pt
+best.pt
+checkpoint_index.json
+```
+
+`latest.pt` is loaded automatically when `train --config ...` is rerun with the
+same data, architecture, source labels, seed, and ECOC settings. The checkpoint
+stores encoder weights, optimizer state, epoch history, best-so-far weights, RNG
+state, and prompt indices. You can raise `encoder.epochs` or adjust
+`encoder.learning_rate` before rerunning; architecture/objective changes require
+a fresh `train_dir`.
+
+After source validation/test evaluation, the workflow also writes
+`encoder_classifier.pkl`, `best_checkpoint.json`, `training_summary.json`, and
+`epoch_metrics.csv` before starting the long generalization scans. That pickle is
+the reusable frozen encoder for standalone transfer commands.
 
 After source training, the run freezes the encoder and evaluates source,
 CP even/odd, and open-data generalization with TabPFN:
@@ -479,6 +562,15 @@ uses `transfer.context_scan_points` log-spaced context sizes, repeats each size
 subsets, and ends at the full validation split unless `transfer.context_size`
 caps it. Every scan point evaluates the full downstream test split, chunked by
 `transfer.query_chunk_size`.
+
+Context scans are resumable at the `(context_size, repeat)` level. The scan
+runner loads any existing `*_context_scan_metrics.json`, skips completed
+successful repeats, and rewrites `*_metrics.json`, `*_context_scan_metrics.json`,
+and `*_context_scan_metrics.csv` after every newly completed repeat. If a job
+times out halfway through Stage 3, 4, or 5, rerunning the matching transfer
+command continues from the remaining scan points instead of recomputing the
+completed ones. Plot files and the final probability arrays are refreshed when a
+scan command reaches its normal end.
 
 Run the standalone CP transfer command after training when you want to rerun only
 the CP even/odd comparison:
@@ -638,6 +730,11 @@ training_summary.json
 epoch_metrics.csv
 encoder_classifier.pkl
 best_checkpoint.json
+training_checkpoints/epoch_0001.pt
+training_checkpoints/epoch_0002.pt
+training_checkpoints/latest.pt
+training_checkpoints/best.pt
+training_checkpoints/checkpoint_index.json
 source_generalization/source_12_class_generalization_metrics.json
 source_generalization/source_12_class_generalization_context_scan_metrics.json
 source_generalization/source_12_class_generalization_context_scan_metrics.csv
@@ -682,11 +779,14 @@ context_scan_comparison/open_data_generalization_accuracy_comparison.pdf
 
 `epoch_metrics.csv` is the easiest file to inspect during development. It contains
 one row per epoch with train loss/accuracy/AUC and validation loss/accuracy/AUC.
-`metrics.json` contains source validation/test metrics plus source, CP even/odd,
-and open-data generalization summaries. `encoder_classifier.pkl` is the checkpoint
-to load for standalone transfer reruns. It keeps the trained encoder, ECOC
-metadata, label scheme, and preprocessing state on CPU so it can be reused
-without a GPU session. If
+`metrics.json` contains source validation/test metrics as soon as source training
+finishes, then is updated with source, CP even/odd, and open-data generalization
+summaries after the full workflow completes. `encoder_classifier.pkl` is the
+checkpoint to load for standalone transfer reruns. It keeps the trained encoder,
+ECOC metadata, label scheme, and preprocessing state on CPU so it can be reused
+without a GPU session. The `train_dir` `.pt` files are the resumable training
+checkpoints; the context-scan JSON/CSV files are the resumable evaluation
+progress records. If
 `device: cuda` is set on a machine without CUDA, the trainer automatically falls
 back to CPU.
 

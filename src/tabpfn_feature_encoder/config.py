@@ -290,6 +290,7 @@ class TransferConfig:
 @dataclass(frozen=True)
 class ProjectConfig:
     output_dir: Path
+    train_dir: Path
     cache_dir: Path | None = None
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
@@ -302,6 +303,7 @@ class ProjectConfig:
     def from_dict(cls, payload: dict[str, Any]) -> ProjectConfig:
         if "output_dir" not in payload:
             raise KeyError("Missing required config key: output_dir")
+        output_dir = Path(payload["output_dir"])
         encoder_payload = payload.get("encoder", {})
         if not isinstance(encoder_payload, dict):
             raise TypeError("encoder must be a mapping.")
@@ -315,7 +317,12 @@ class ProjectConfig:
         if not isinstance(metrics, list):
             raise TypeError("metrics must be a list.")
         return cls(
-            output_dir=Path(payload["output_dir"]),
+            output_dir=output_dir,
+            train_dir=(
+                Path(payload["train_dir"])
+                if "train_dir" in payload
+                else output_dir / "training_checkpoints"
+            ),
             cache_dir=Path(payload["cache_dir"]) if "cache_dir" in payload else None,
             encoder=EncoderConfig.from_dict(encoder_payload),
             dataset=DatasetConfig.from_dict(dataset_payload),

@@ -81,6 +81,71 @@ def test_encoder_only_classifier_uses_encoder_config_and_predicts_probabilities(
     assert classifier.get_training_summary()["tabpfn_used_for_training"] is True
 
 
+def test_encoder_only_classifier_saves_and_resumes_epoch_checkpoints(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(encoder_classifier_mod, "TabPFNPromptAdapter", FakeTabPFNPromptAdapter)
+    X_train = np.array(
+        [
+            [-2.0, 0.0],
+            [-1.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    y_train = np.array([0, 0, 1, 1])
+    checkpoint_dir = tmp_path / "training_checkpoints"
+    cfg = EncoderConfig(
+        type="residual_mlp",
+        layers=2,
+        hidden_dim=4,
+        output_dim=2,
+        epochs=1,
+        learning_rate=0.01,
+        batch_size=2,
+        early_stopping_patience=0,
+    )
+
+    EncoderOnlyClassifier(encoder=cfg, device="cpu", random_state=3).fit(
+        X_train,
+        y_train,
+        X_val=X_train,
+        y_val=y_train,
+        checkpoint_dir=checkpoint_dir,
+    )
+
+    assert (checkpoint_dir / "epoch_0001.pt").exists()
+    assert (checkpoint_dir / "latest.pt").exists()
+    assert (checkpoint_dir / "checkpoint_index.json").exists()
+
+    resumed_cfg = EncoderConfig(
+        type="residual_mlp",
+        layers=2,
+        hidden_dim=4,
+        output_dim=2,
+        epochs=2,
+        learning_rate=0.02,
+        batch_size=2,
+        early_stopping_patience=0,
+    )
+    resumed = EncoderOnlyClassifier(
+        encoder=resumed_cfg,
+        device="cpu",
+        random_state=3,
+    ).fit(
+        X_train,
+        y_train,
+        X_val=X_train,
+        y_val=y_train,
+        checkpoint_dir=checkpoint_dir,
+    )
+
+    assert [record.epoch for record in resumed.history_] == [1, 2]
+    assert (checkpoint_dir / "epoch_0002.pt").exists()
+
+
 def test_encoder_only_classifier_maps_labels_to_contiguous_training_indices(monkeypatch) -> None:
     monkeypatch.setattr(encoder_classifier_mod, "TabPFNPromptAdapter", FakeTabPFNPromptAdapter)
     X_train = np.array(

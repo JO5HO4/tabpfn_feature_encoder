@@ -7,6 +7,7 @@ def test_project_config_from_dict() -> None:
     cfg = ProjectConfig.from_dict(
         {
             "output_dir": "/tmp/demo",
+            "train_dir": "/tmp/demo-train",
             "cache_dir": "/tmp/cache",
             "seed": 7,
             "device": "cpu",
@@ -63,6 +64,7 @@ def test_project_config_from_dict() -> None:
     )
 
     assert cfg.output_dir == Path("/tmp/demo")
+    assert cfg.train_dir == Path("/tmp/demo-train")
     assert cfg.cache_dir == Path("/tmp/cache")
     assert cfg.seed == 7
     assert cfg.dataset.raw_dir == Path("/tmp/root")
@@ -110,6 +112,7 @@ def test_encoder_defaults_match_main_training_config() -> None:
     cfg = ProjectConfig.from_dict({"output_dir": "/tmp/demo"})
 
     assert cfg.device == "cuda"
+    assert cfg.train_dir == Path("/tmp/demo/training_checkpoints")
     assert cfg.encoder.type == "residual_mlp"
     assert cfg.encoder.layers == 4
     assert cfg.encoder.hidden_dim == 64
