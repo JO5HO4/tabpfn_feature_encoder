@@ -21,6 +21,10 @@ from tabpfn_feature_encoder.utils.io import load_pickle, save_json, save_pickle
 from tabpfn_feature_encoder.utils.seed import set_global_seed
 
 
+def _log_progress(message: str) -> None:
+    print(f"[tabpfn-feature-encoder] {message}", flush=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train and evaluate a TabPFN feature encoder.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -110,6 +114,11 @@ def run_train(config_path: Path) -> None:
     set_global_seed(cfg.seed)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     save_json({"config_path": str(config_path)}, cfg.output_dir / "run_metadata.json")
+    _log_progress(
+        "Starting full train/evaluate workflow: "
+        f"config={config_path}, output_dir={cfg.output_dir}, "
+        f"encoder={cfg.encoder.type}, device={cfg.device}"
+    )
 
     use_graph_encoder = cfg.encoder.type.lower() in {
         "gnn",
@@ -120,11 +129,21 @@ def run_train(config_path: Path) -> None:
         "graph_transformer",
     }
     cache_dir = _cache_subdir(cfg.cache_dir, "source_multiclass")
+    _log_progress(
+        "Stage 1/6 loading source dataset: "
+        f"raw_dir={cfg.dataset.raw_dir}, cache_dir={cache_dir}, "
+        f"graph_features={use_graph_encoder}"
+    )
     dataset = build_default_cp_dataset(
         random_state=cfg.seed,
         dataset_config=cfg.dataset,
         build_graphs=use_graph_encoder,
         cache_dir=cache_dir,
+    )
+    _log_progress(
+        "Loaded source dataset: "
+        f"train={len(dataset.y_train)}, val={len(dataset.y_val)}, "
+        f"test={len(dataset.y_test)}, flat_features={dataset.X_train.shape[1]}"
     )
     X_train = dataset.graph_train if use_graph_encoder else dataset.X_train
     X_val = dataset.graph_val if use_graph_encoder else dataset.X_val
@@ -135,6 +154,7 @@ def run_train(config_path: Path) -> None:
         device=cfg.device,
         random_state=cfg.seed,
     )
+    _log_progress("Stage 2/6 training source encoder through frozen TabPFN.")
     model.fit(
         X_train,
         dataset.y_train,
@@ -145,6 +165,7 @@ def run_train(config_path: Path) -> None:
     X_test = dataset.graph_test if use_graph_encoder else dataset.X_test
     if X_test is None:
         raise RuntimeError("Graph encoder requested, but graph test dataset was not built.")
+    _log_progress("Evaluating best source encoder checkpoint on validation and test splits.")
     source_test_metrics = model.evaluate(X_test, dataset.y_test)
     print(
         "source_12_class val: "
@@ -155,16 +176,19 @@ def run_train(config_path: Path) -> None:
         + ", ".join(f"{key}={value:.3f}" for key, value in source_test_metrics.items())
     )
 
+    _log_progress("Stage 3/6 running source 12-class TabPFN context scan.")
     source_generalization = _run_source_generalization(
         cfg=cfg,
         model=model,
         dataset=dataset,
     )
+    _log_progress("Stage 4/6 running held-out CP even/odd TabPFN context scan.")
     cp_generalization = _run_cp_generalization(
         cfg=cfg,
         model=model,
         use_graph_encoder=use_graph_encoder,
     )
+    _log_progress("Stage 5/6 running open-data GamGam TabPFN context scan.")
     open_data_generalization = _run_open_data_generalization(
         cfg=cfg,
         model=model,
@@ -193,6 +217,7 @@ def run_train(config_path: Path) -> None:
             ),
             "n_flat_features": int(dataset.X_train.shape[1]),
             "n_tabpfn_features": int(cfg.encoder.output_dim),
+            "trainable_encoder_params": model._count_trainable_parameters(model.encoder_model_),
         }
     )
     if use_graph_encoder and dataset.graph_train is not None:
@@ -206,6 +231,7 @@ def run_train(config_path: Path) -> None:
         else:
             print(f"{key}: {value}")
 
+    _log_progress("Stage 6/6 saving model and metric artifacts.")
     model.prepare_for_serialization()
     best_checkpoint_path = cfg.output_dir / "encoder_classifier.pkl"
     save_pickle(model, best_checkpoint_path)
@@ -216,8 +242,9 @@ def run_train(config_path: Path) -> None:
             "source_val_roc_auc": metrics.get("source_val_roc_auc"),
             "source_val_accuracy": metrics.get("source_val_accuracy"),
             "source_val_log_loss": metrics.get("source_val_log_loss"),
-            "source_training_task": "12_class_supervised_encoder_pretraining",
-            "tabpfn_used_for_source_training": False,
+            "source_training_task": "frozen_tabpfn_support_query_encoder_training",
+            "tabpfn_used_for_source_training": True,
+            "tabpfn_trainable": False,
         },
         cfg.output_dir / "best_checkpoint.json",
     )
@@ -240,6 +267,7 @@ def run_train(config_path: Path) -> None:
     saved["best_checkpoint_metadata"] = cfg.output_dir / "best_checkpoint.json"
     for name, path in saved.items():
         print(f"saved {name}: {path}")
+    _log_progress("Full train/evaluate workflow finished.")
 
 
 def run_source_transfer(config_path: Path, model_path: Path | None = None) -> dict[str, Any]:
@@ -360,6 +388,11 @@ def _cache_subdir(cache_dir: Path | None, name: str) -> Path | None:
     return cache_dir / name
 
 
+def _split_size(dataset: Any, split_name: str) -> int | str:
+    values = getattr(dataset, split_name, None)
+    return "unknown" if values is None else len(values)
+
+
 def _load_encoder_checkpoint(
     *,
     cfg: Any,
@@ -402,6 +435,7 @@ def _run_source_generalization(
     dataset: Any,
 ) -> dict[str, Any]:
     output_dir = cfg.output_dir / "source_generalization"
+    _log_progress("Running source 12-class TabPFN context scan.")
     print(
         "Source 12-class TabPFN context scan: "
         f"context_split=val, min_per_class={cfg.transfer.context_min_per_class}, "
@@ -436,11 +470,21 @@ def _run_cp_generalization(
 ) -> dict[str, Any]:
     cp_dataset_config = _cp_generalization_dataset_config(cfg.dataset)
     cache_dir = _cache_subdir(cfg.cache_dir, "cp_even_odd_generalization")
+    _log_progress(
+        "Loading held-out CP even/odd dataset: "
+        f"raw_dir={cp_dataset_config.raw_dir}, cache_dir={cache_dir}, "
+        f"graph_features={use_graph_encoder}"
+    )
     dataset = build_default_cp_dataset(
         random_state=cfg.seed,
         dataset_config=cp_dataset_config,
         build_graphs=use_graph_encoder,
         cache_dir=cache_dir,
+    )
+    _log_progress(
+        "Running held-out CP even/odd TabPFN context scan: "
+        f"context_pool={_split_size(dataset, 'y_val')}, "
+        f"query={_split_size(dataset, 'y_test')}"
     )
     output_dir = cfg.output_dir / "cp_generalization"
     print(
@@ -476,11 +520,30 @@ def _run_open_data_generalization(
 ) -> dict[str, Any]:
     output_dir = cfg.transfer.output_dir or cfg.output_dir / "open_data_generalization"
     cache_dir = cfg.transfer.cache_dir or _cache_subdir(cfg.cache_dir, "gamgam_production_modes")
+    _log_progress(
+        "Loading open-data GamGam dataset: "
+        f"raw_dir={cfg.transfer.raw_dir}, cache_dir={cache_dir}, "
+        f"graph_features={model.is_graph_input_}"
+    )
     dataset = build_gamgam_dataset(
         random_state=cfg.seed,
         transfer_config=cfg.transfer,
         cache_dir=cache_dir,
         build_graphs=model.is_graph_input_,
+    )
+    _log_progress(
+        "Running open-data GamGam TabPFN context scan: "
+        f"context_pool={_split_size(dataset, 'y_val')}, "
+        f"query={_split_size(dataset, 'y_test')}"
+    )
+    print(
+        "Open-data GamGam TabPFN context scan: "
+        f"context_split=val, min_per_class={cfg.transfer.context_min_per_class}, "
+        f"points={cfg.transfer.context_scan_points}, "
+        f"repeats={cfg.transfer.context_repeats}, "
+        f"max_context={cfg.transfer.context_size or 'full_val'}, "
+        f"query_chunk={cfg.transfer.query_chunk_size}, "
+        "query_split=test"
     )
     metrics = run_encoder_context_scan_evaluation(
         trained=model,

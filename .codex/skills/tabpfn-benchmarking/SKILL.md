@@ -7,8 +7,13 @@ description: Use when adding, reviewing, or interpreting benchmark/generalizatio
 
 ## Current Comparison
 
-Every default run trains the encoder on the 12-class source task without TabPFN,
-then freezes it for source-task and downstream TabPFN tests.
+Every default run trains the encoder on the 12-class source task through frozen
+TabPFN support/query episodes, then freezes it for source-task and downstream
+TabPFN tests. TabPFN model weights are never optimized.
+
+The default source objective uses balanced binary ECOC for the 12-class task,
+with `tabpfn_max_classes: 2`, `many_class_redundancy: 4`, and rotating episodic
+validation using `validation_episodes: 8`.
 
 Use `bash scripts/run_full_workflow.sh` to produce the nominal residual MLP, GNN,
 and transformer comparison runs. On multi-GPU nodes this runs configs in
@@ -19,6 +24,7 @@ Source metrics:
 - `source_val_*`
 - `source_test_*`
 - `source_generalization_*`
+- `epoch_metrics.csv` with train/validation metrics and gradient norms
 
 Generalization metrics:
 
@@ -60,6 +66,7 @@ Benchmark outputs should include:
 Terminal output should report, at minimum:
 
 ```text
+encoder_tabpfn epoch ... train_loss=..., train_accuracy=..., train_roc_auc=..., grad_norm_mean=..., grad_norm_max=..., val_loss=..., val_accuracy=..., val_roc_auc=...
 source_12_class test: accuracy=..., log_loss=..., roc_auc=...
 source_12_class_generalization baseline_tabpfn: accuracy=..., log_loss=..., roc_auc=...
 source_12_class_generalization frozen_encoder_tabpfn: accuracy=..., log_loss=..., roc_auc=...

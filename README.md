@@ -12,10 +12,80 @@ held-out downstream tasks.
 2. Build flat tabular features for the MLP-style encoders, or variable-particle event graphs for the GNN/transformer encoders.
 3. Split the full dataset into train/validation/test with a 50/25/25 stratified split.
 4. Standardize features using train-set statistics only.
-5. Train the encoder with a direct supervised multiclass head on 12 source labels.
-6. Keep TabPFN out of source training, which avoids the default 10-class TabPFN limit.
+5. Train the encoder through frozen TabPFN support/query episodes.
+6. Use ECOC subtasks when the source task has more classes than TabPFN accepts directly.
 7. Restore the best validation-AUC encoder and report source test metrics.
 8. Freeze the encoder and run TabPFN context scans on the source task, held-out CP even/odd, and open data.
+
+## Framework Diagram
+
+Source training optimizes only the encoder. TabPFN is frozen, but gradients flow
+through its differentiable input path back into the encoder:
+
+```text
+                         source episode
+                  sampled from 12-class ATLAS data
+
+        support features X_s                      query features X_q
+                |                                        |
+                v                                        v
+        trainable encoder E_theta                trainable encoder E_theta
+                |                                        |
+                v                                        v
+        encoded support Z_s                      encoded query Z_q
+                |                                        |
+                |                                        v
+        support labels y_s -------------> frozen TabPFN prompt
+                                                         |
+                                                         v
+                                                query logits / scores
+                                                         |
+                                                         v
+                                           loss(logits, query labels y_q)
+                                                         |
+                                                         v
+                                          backprop updates E_theta only
+
+                         TabPFN weights stay frozen
+```
+
+For the 12-class source task, the trainer wraps that episode in an ECOC
+many-class layer:
+
+```text
+12 source labels
+      |
+      v
+ECOC codebook
+      |
+      v
+multiple binary ECOC subtasks, controlled by encoder.tabpfn_max_classes: 2
+      |
+      v
+frozen TabPFN support/query loss per subtask
+      |
+      v
+decoded validation/test probabilities in the original 12-class space
+```
+
+After source training, the encoder is frozen and used as a feature map for
+TabPFN context scans:
+
+```text
+downstream context X_context        downstream query X_query
+              |                               |
+              v                               v
+        frozen encoder                  frozen encoder
+              |                               |
+              v                               v
+      encoded context Z_context        encoded query Z_query
+              |                               |
+              |                               v
+      context labels y_context ---> TabPFN prediction
+                                      |
+                                      v
+                          baseline vs frozen-encoder metrics
+```
 
 ## Encoder Choice
 
@@ -33,11 +103,11 @@ Use `mlp` only if you intentionally want a pure learned projection.
 
 The repo also includes a lightweight GNN that uses every configured particle in
 each event. It builds particle nodes from the jagged ROOT branches, runs a small
-message-passing network, appends fixed event-summary features, and passes a 128D
+message-passing network, appends fixed event-summary features, and passes a 72D
 hybrid output to TabPFN:
 
 ```text
-particles + scalars -> GNN + event summaries -> 128D event vector -> TabPFN
+particles + scalars -> GNN + event summaries -> 72D event vector -> TabPFN
 ```
 
 Run it with [configs/source_gnn.yaml](configs/source_gnn.yaml). The GNN ignores particle
@@ -49,7 +119,7 @@ inputs and fixed event summaries as the GNN, but replaces message passing with
 self-attention over all particles in an event:
 
 ```text
-particles + scalars -> particle transformer + event summaries -> 128D event vector -> TabPFN
+particles + scalars -> particle transformer + event summaries -> 72D event vector -> TabPFN
 ```
 
 Run it with [configs/source_transformer.yaml](configs/source_transformer.yaml), or set
@@ -70,10 +140,31 @@ residual scale:
 encoder(x) = x * (1 + residual_scale * tanh(gate))
 ```
 
-Source training clips encoder gradients, keeps TabPFN out of the optimization
-loop, restores the best validation-AUC encoder, and stops early after repeated
-non-improving epochs. TabPFN is used only after source training, when the encoder
-is frozen for CP even/odd and open-data generalization.
+Source training clips encoder gradients, keeps TabPFN weights frozen, restores
+the best validation-AUC encoder, and stops early after repeated non-improving
+epochs. Gradients flow through TabPFN's differentiable input path into the
+encoder only. For 12-class source training, the task is decomposed into balanced
+binary ECOC subtasks and decoded back to the original class space; this gives
+the encoder many simpler losses instead of nearly full 10-way surrogate tasks.
+Validation is also episodic: each epoch rotates through validation support/query
+episodes with the same 50/50 split used in training, then decodes the query
+scores back to the original 12-class space.
+
+## Fair Comparison Defaults
+
+The nominal MLP, GNN, and transformer configs are sized to be comparable before
+running the full workflow. They all emit the same 72-dimensional TabPFN feature
+vector and have nearly matched trainable encoder parameter counts:
+
+```text
+encoder              output_dim   hidden_dim   layers   trainable params
+residual_mlp              72           64         4          17,672
+gnn                       72           40         1          17,904
+transformer               72           28         1          18,100
+```
+
+These counts include only encoder parameters. TabPFN is frozen during source
+training and is shared across model comparisons.
 
 ## Environment
 
@@ -125,13 +216,16 @@ encoder:
   hidden_dim: 64
   output_dim: 72
   epochs: 20
-  learning_rate: 0.00005
+  learning_rate: 0.0002
   batch_size: 2048
   support_query_ratio: 0.5
   residual_scale: 0.1
-  grad_clip_norm: 0.1
+  grad_clip_norm: 1.0
   early_stopping_patience: 8
   min_delta: 0.001
+  tabpfn_max_classes: 2
+  many_class_redundancy: 4
+  validation_episodes: 8
 
 dataset:
   raw_dir: /global/cfs/projectdirs/atlas/joshua/gnn_data/stats_100K
@@ -192,10 +286,12 @@ classes: 12
 split: 50/25/25 stratified train/validation/test
 ```
 
-With `batch_size: 2048`, the source classifier updates on 2048 training events
-per optimizer step. Downstream TabPFN inference is separate from source training:
-it scans context sizes sampled from the downstream validation split, then
-predicts the held-out test split in chunks of `transfer.query_chunk_size`.
+With `batch_size: 2048`, each source optimizer step samples a balanced
+support/query episode of roughly that size. Source validation uses
+`encoder.validation_episodes` rotating validation support/query episodes per
+epoch. Downstream TabPFN inference is separate from source training: it scans
+context sizes sampled from the downstream validation split, then predicts the
+held-out test split in chunks of `transfer.query_chunk_size`.
 
 ```text
 context: 100 events/class -> full validation split
@@ -208,7 +304,7 @@ With the default `type: residual_mlp`, `output_dim: 72` is the flat feature coun
 sent to TabPFN. The residual branch is zero-initialized, so epoch-zero behavior is
 the raw standardized TabPFN baseline.
 
-With `type: gnn`, `output_dim: 128` is the event embedding size sent to TabPFN.
+With `type: gnn`, `output_dim: 72` is the event embedding size sent to TabPFN.
 The GNN embedding is intentionally hybrid: it concatenates a learned graph
 representation with fixed graph summary features, including global features,
 event particle count, per-type particle counts, pooled particle statistics, and
@@ -229,7 +325,7 @@ bash scripts/run_source_encoder.sh configs/source_transformer.yaml
 With `type: residual_mlp`, `type: feature_mixer`, or `type: feature_gate`,
 `output_dim` must match the number of flat input features, currently 72.
 
-Source validation is the direct 12-class classifier validation split and drives
+Source validation uses rotating validation support/query prompts and drives
 early stopping. Downstream CP even/odd and open-data TabPFN tests use their own
 validation split as the TabPFN context pool and their test split as the query
 set. Set `transfer.context_size` only when you want to cap the largest scanned
@@ -264,13 +360,26 @@ Full workflow for the nominal benchmark:
 bash scripts/run_full_workflow.sh
 ```
 
+The dispatcher spelling also works:
+
+```bash
+bash scripts/run full workflow
+```
+
 This runs the residual MLP, GNN, and transformer configs. For each config, the
 launcher trains on the 12-class source task, then runs the held-out CP even/odd
 transfer and ATLAS open-data GamGam transfer evaluations.
 
 On a multi-GPU node, the full workflow runs configs in parallel by default, one
-config per visible GPU. Logs are written under `runs/workflow_logs/<timestamp>/`.
-For a 4-GPU node, the default three encoder configs all start together.
+config per visible GPU. Logs stream to the terminal with per-config prefixes and
+are also written under `runs/workflow_logs/<timestamp>/`. For a 4-GPU node, the
+default three encoder configs all start together.
+
+To keep the terminal quiet and write only log files:
+
+```bash
+TABPFN_WORKFLOW_STREAM_LOGS=0 bash scripts/run_full_workflow.sh
+```
 
 To choose GPUs explicitly:
 
@@ -326,10 +435,18 @@ tabpfn-encoder-train train --config configs/source_residual_mlp.yaml
 
 ## Source Training
 
-The default `train` command trains only the encoder plus a linear classification
-head on the 12-class source task. Labels are mapped internally to contiguous
-classifier indices, so this path bypasses TabPFN's default 10-class limit. The
-saved encoder checkpoint keeps the source label scheme in `training_summary.json`.
+The default `train` command trains only encoder weights, but the loss comes from
+frozen TabPFN predictions. Each optimizer step samples support/query events,
+passes both through the encoder, fits the TabPFN prompt on encoded support
+features and support labels, predicts encoded query features, and backpropagates
+the query loss through TabPFN's input path into the encoder. TabPFN model
+parameters are not optimized.
+
+For source tasks above TabPFN's class limit, the trainer builds an
+error-correcting output-code (ECOC) codebook. Each ECOC column is a balanced
+small-class TabPFN task; losses are averaged over these support/query subtasks
+across training steps, and validation probabilities are decoded back to the
+original source classes from rotating validation support/query episodes.
 
 After source training, the run freezes the encoder and evaluates source,
 CP even/odd, and open-data generalization with TabPFN:
@@ -480,8 +597,8 @@ A run should look like:
 ```text
 Using TabPFN model: ...
 Loading cached dataset: ...
-Encoder-only classifier settings: type=residual_mlp, device=cuda, layers=4, hidden_dim=64, output_dim=72, batch_size=2048
-encoder_only epoch 1/20: train_loss=..., train_accuracy=..., train_roc_auc=..., batches=49/49, val_loss=..., val_accuracy=..., val_roc_auc=...
+Encoder+TabPFN settings: type=residual_mlp, device=cuda, layers=4, hidden_dim=64, output_dim=72, trainable_encoder_params=17672, batch_size=2048, support_query_ratio=0.5, learning_rate=0.0002, grad_clip_norm=1.0, validation_episodes=8, ecoc_tasks=16, alphabet_size=2
+encoder_tabpfn epoch 1/20: train_loss=..., train_accuracy=..., train_roc_auc=..., grad_norm_mean=..., grad_norm_max=..., batches=49/49, val_loss=..., val_accuracy=..., val_roc_auc=...
 source_12_class val: accuracy=..., log_loss=..., roc_auc=...
 source_12_class test: accuracy=..., log_loss=..., roc_auc=...
 source_12_class_generalization context=1200 repeat=1/5: baseline_auc=..., encoder_auc=..., delta_auc=...
@@ -566,9 +683,9 @@ context_scan_comparison/open_data_generalization_accuracy_comparison.pdf
 one row per epoch with train loss/accuracy/AUC and validation loss/accuracy/AUC.
 `metrics.json` contains source validation/test metrics plus source, CP even/odd,
 and open-data generalization summaries. `encoder_classifier.pkl` is the checkpoint
-to load for standalone transfer reruns. It keeps the trained encoder,
-classifier head, label scheme, and preprocessing state on CPU so it can be
-reused without a GPU session. If
+to load for standalone transfer reruns. It keeps the trained encoder, ECOC
+metadata, label scheme, and preprocessing state on CPU so it can be reused
+without a GPU session. If
 `device: cuda` is set on a machine without CUDA, the trainer automatically falls
 back to CPU.
 

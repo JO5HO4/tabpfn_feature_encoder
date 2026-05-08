@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+show_usage() {
+    cat <<'EOF'
+Usage:
+  bash scripts/run full workflow [CONFIG ...]
+  bash scripts/run full-workflow [CONFIG ...]
+
+This is a small dispatcher for the full workflow launcher. Extra arguments are
+passed through to scripts/run_full_workflow.sh as config paths.
+EOF
+}
+
+if [[ "$#" -ge 2 && "$1" == "full" && "$2" == "workflow" ]]; then
+    shift 2
+    exec "${SCRIPT_DIR}/run_full_workflow.sh" "$@"
+fi
+
+if [[ "$#" -ge 1 && ( "$1" == "full-workflow" || "$1" == "full_workflow" ) ]]; then
+    shift 1
+    exec "${SCRIPT_DIR}/run_full_workflow.sh" "$@"
+fi
+
+show_usage >&2
+exit 2

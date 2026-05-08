@@ -59,6 +59,7 @@ class ParticleTransformerEncoder(TorchModule):
             layer,
             num_layers=max(1, int(layers)),
             norm=nn_mod.LayerNorm(self.hidden_dim),
+            enable_nested_tensor=False,
         )
         self.out = (
             nn_mod.Sequential(

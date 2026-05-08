@@ -14,6 +14,7 @@ class TabPFNPromptAdapter:
 
     device: str
     model_path: str | Path | None = None
+    random_state: int | None = None
     model: Any = None
     _prior_frozen: bool = False
 
@@ -38,6 +39,7 @@ class TabPFNPromptAdapter:
             n_estimators=1,
             inference_precision=torch_mod.float32,
             model_path=model_path,
+            random_state=0 if self.random_state is None else int(self.random_state),
         )
         return self
 

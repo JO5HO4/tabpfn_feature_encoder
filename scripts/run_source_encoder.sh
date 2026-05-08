@@ -8,6 +8,7 @@ CONFIG_PATH="${1:-${REPO_ROOT}/configs/source_residual_mlp.yaml}"
 
 export TABPFN_MODEL_CACHE_DIR="${TABPFN_MODEL_CACHE_DIR:-${SCRATCH:-${REPO_ROOT}/runs}/tabpfn_model_cache}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 if [[ -z "${TABPFN_MODEL_PATH:-}" ]]; then
     for candidate in \

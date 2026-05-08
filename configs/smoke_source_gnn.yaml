@@ -5,17 +5,20 @@ device: cuda
 
 encoder:
   type: gnn
-  layers: 3
-  hidden_dim: 128
-  output_dim: 128
+  layers: 1
+  hidden_dim: 40
+  output_dim: 72
   epochs: 1
-  learning_rate: 0.00005
+  learning_rate: 0.0002
   batch_size: 2048
   support_query_ratio: 0.5
   residual_scale: 0.1
-  grad_clip_norm: 0.1
+  grad_clip_norm: 1.0
   early_stopping_patience: 5
   min_delta: 0.0
+  tabpfn_max_classes: 2
+  many_class_redundancy: 4
+  validation_episodes: 4
 
 dataset:
   raw_dir: /global/cfs/projectdirs/atlas/joshua/gnn_data/stats_100K

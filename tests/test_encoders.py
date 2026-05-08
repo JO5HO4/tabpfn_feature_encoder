@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import torch
 
+from tabpfn_feature_encoder.config import load_project_config
 from tabpfn_feature_encoder.data.graphs import EventGraphDataset
 from tabpfn_feature_encoder.models.factory import build_encoder
 from tabpfn_feature_encoder.models.feature_gate import FeatureGateEncoder
@@ -218,3 +221,36 @@ def test_lightweight_gnn_encoder_appends_direct_summary_features() -> None:
     assert encoder.summary_dim == 2 + 1 + 2 + 3 * 8 + 2 * 2 * 6
     assert out.shape == (2, 64)
     assert torch.allclose(out[:, -encoder.summary_dim :], expected_summary)
+
+
+def test_nominal_encoder_configs_have_matched_output_and_parameter_counts() -> None:
+    specs = {
+        "source_residual_mlp.yaml": {"input_dim": 72, "global_dim": 0},
+        "source_gnn.yaml": {"input_dim": 10, "global_dim": 2},
+        "source_transformer.yaml": {"input_dim": 10, "global_dim": 2},
+    }
+    counts = {}
+    for filename, dims in specs.items():
+        cfg = load_project_config(Path("configs") / filename)
+        encoder = build_encoder(
+            encoder_type=cfg.encoder.type,
+            input_dim=dims["input_dim"],
+            global_dim=dims["global_dim"],
+            hidden_dim=cfg.encoder.hidden_dim,
+            output_dim=cfg.encoder.output_dim,
+            layers=cfg.encoder.layers,
+            residual_scale=cfg.encoder.residual_scale,
+            attention_heads=cfg.encoder.attention_heads,
+        )
+        counts[cfg.encoder.type] = sum(
+            param.numel() for param in encoder.parameters() if param.requires_grad
+        )
+        assert cfg.encoder.output_dim == 72
+
+    baseline = counts["residual_mlp"]
+    assert counts == {
+        "residual_mlp": 17_672,
+        "gnn": 17_904,
+        "transformer": 18_100,
+    }
+    assert all(abs(count - baseline) / baseline < 0.03 for count in counts.values())

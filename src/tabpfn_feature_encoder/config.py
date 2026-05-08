@@ -22,6 +22,9 @@ class EncoderConfig:
     grad_clip_norm: float = 0.1
     early_stopping_patience: int = 8
     min_delta: float = 0.001
+    many_class_redundancy: int = 4
+    tabpfn_max_classes: int = 10
+    validation_episodes: int = 8
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> EncoderConfig:
@@ -32,6 +35,9 @@ class EncoderConfig:
         early_stopping_patience = int(payload.get("early_stopping_patience", 8))
         min_delta = float(payload.get("min_delta", 0.001))
         attention_heads = int(payload.get("attention_heads", payload.get("heads", 4)))
+        many_class_redundancy = int(payload.get("many_class_redundancy", 4))
+        tabpfn_max_classes = int(payload.get("tabpfn_max_classes", 10))
+        validation_episodes = int(payload.get("validation_episodes", 8))
         if not 0.0 < support_query_ratio < 1.0:
             raise ValueError("encoder.support_query_ratio must be between 0 and 1.")
         if attention_heads <= 0:
@@ -44,6 +50,12 @@ class EncoderConfig:
             raise ValueError("encoder.early_stopping_patience must be non-negative.")
         if min_delta < 0.0:
             raise ValueError("encoder.min_delta must be non-negative.")
+        if many_class_redundancy <= 0:
+            raise ValueError("encoder.many_class_redundancy must be positive.")
+        if tabpfn_max_classes <= 1:
+            raise ValueError("encoder.tabpfn_max_classes must be greater than one.")
+        if validation_episodes <= 0:
+            raise ValueError("encoder.validation_episodes must be positive.")
         return cls(
             type=encoder_type,
             layers=int(payload.get("layers", 4)),
@@ -58,6 +70,9 @@ class EncoderConfig:
             grad_clip_norm=grad_clip_norm,
             early_stopping_patience=early_stopping_patience,
             min_delta=min_delta,
+            many_class_redundancy=many_class_redundancy,
+            tabpfn_max_classes=tabpfn_max_classes,
+            validation_episodes=validation_episodes,
         )
 
 

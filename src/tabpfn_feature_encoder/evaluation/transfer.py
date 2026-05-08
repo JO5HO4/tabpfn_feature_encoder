@@ -69,6 +69,15 @@ def run_encoder_context_scan_evaluation(
         max_context_size=max_context_size,
     )
 
+    print(
+        f"{name} context scan setup: "
+        f"context_pool={len(y_context_pool)}, query={len(y_test)}, "
+        f"sizes={','.join(str(int(size)) for size in context_sizes)}, "
+        f"repeats={context_repeats}, query_chunk={query_chunk_size}, "
+        f"device={effective_device}",
+        flush=True,
+    )
+    print(f"{name} encoding frozen-encoder validation and test features...", flush=True)
     encoded_context_pool = _encode_subset(
         trained=trained,
         dataset=dataset,
@@ -83,6 +92,11 @@ def run_encoder_context_scan_evaluation(
         indices=None,
         batch_size=query_chunk_size,
     )
+    print(
+        f"{name} encoded features ready: "
+        f"context_shape={encoded_context_pool.shape}, query_shape={encoded_test.shape}",
+        flush=True,
+    )
     flat_context_pool = dataset.X_val.to_numpy(dtype=np.float32)
     flat_test_raw = dataset.X_test.to_numpy(dtype=np.float32)
 
@@ -91,6 +105,11 @@ def run_encoder_context_scan_evaluation(
     last_baseline_proba: np.ndarray | None = None
     for scan_idx, context_size in enumerate(context_sizes):
         size_oom = False
+        print(
+            f"{name} context size {scan_idx + 1}/{len(context_sizes)}: "
+            f"requested={int(context_size)}, repeats={context_repeats}",
+            flush=True,
+        )
         for repeat_idx in range(int(context_repeats)):
             context_idx = stratified_sample_indices(
                 y_context_pool,
@@ -98,6 +117,11 @@ def run_encoder_context_scan_evaluation(
                 random_state=random_state + 30_000 + scan_idx * 1_000 + repeat_idx,
             )
             context_counts = _class_counts(y_context_pool[context_idx])
+            print(
+                f"{name} context={len(context_idx)} repeat={repeat_idx + 1}/{context_repeats}: "
+                "running frozen-encoder and baseline TabPFN predictions...",
+                flush=True,
+            )
             try:
                 encoded_proba = _tabpfn_predict_proba(
                     X_context=encoded_context_pool[context_idx],
@@ -157,7 +181,8 @@ def run_encoder_context_scan_evaluation(
                 f"{name} context={record['context_size']} repeat={repeat_idx + 1}/{context_repeats}: "
                 f"baseline_auc={baseline_metrics['roc_auc']:.3f}, "
                 f"encoder_auc={encoded_metrics['roc_auc']:.3f}, "
-                f"delta_auc={record['delta']['roc_auc']:.3f}"
+                f"delta_auc={record['delta']['roc_auc']:.3f}",
+                flush=True,
             )
         if size_oom:
             break
@@ -195,6 +220,7 @@ def run_encoder_context_scan_evaluation(
     save_json(records, output_path / f"{name}_context_scan_metrics.json")
     _save_scan_csv(records, output_path / f"{name}_context_scan_metrics.csv")
     _save_scan_plots(records, output_path, name)
+    print(f"{name} saved context-scan artifacts: {output_path}", flush=True)
     if last_encoded_proba is not None:
         np.save(output_path / f"{name}_frozen_encoder_proba.npy", last_encoded_proba)
     if last_baseline_proba is not None:
@@ -251,8 +277,75 @@ def _tabpfn_predict_proba(
     query_chunk_size: int,
     device: str,
 ) -> np.ndarray:
+    y_context = np.asarray(y_context, dtype=np.int64)
+    classes = np.unique(y_context)
+    max_classes = 10
+    if len(classes) > max_classes:
+        return _tabpfn_predict_ecoc_proba(
+            X_context=X_context,
+            y_context=y_context,
+            X_query=X_query,
+            query_chunk_size=query_chunk_size,
+            device=device,
+            classes=classes,
+            max_classes=max_classes,
+        )
+    return _tabpfn_predict_small_proba(
+        X_context=X_context,
+        y_context=y_context,
+        X_query=X_query,
+        query_chunk_size=query_chunk_size,
+        device=device,
+        n_classes=len(classes),
+    )
+
+
+def _tabpfn_predict_ecoc_proba(
+    *,
+    X_context: np.ndarray,
+    y_context: np.ndarray,
+    X_query: np.ndarray,
+    query_chunk_size: int,
+    device: str,
+    classes: np.ndarray,
+    max_classes: int,
+) -> np.ndarray:
+    class_to_idx = {int(label): idx for idx, label in enumerate(classes)}
+    y_context_encoded = np.asarray([class_to_idx[int(label)] for label in y_context], dtype=np.int64)
+    codebook = EncoderOnlyClassifier._make_ecoc_codebook(
+        n_classes=len(classes),
+        alphabet_size=max_classes,
+        redundancy=4,
+        random_state=30_421,
+    )
+    if codebook is None:
+        raise RuntimeError("ECOC codebook was unexpectedly empty for a many-class task.")
+    class_scores = np.zeros((len(X_query), len(classes)), dtype=np.float64)
+    for task_idx in range(codebook.shape[1]):
+        y_task = codebook[y_context_encoded, task_idx]
+        task_proba = _tabpfn_predict_small_proba(
+            X_context=X_context,
+            y_context=y_task,
+            X_query=X_query,
+            query_chunk_size=query_chunk_size,
+            device=device,
+            n_classes=max_classes,
+        )
+        class_scores += np.log(np.clip(task_proba[:, codebook[:, task_idx]], 1e-15, 1.0))
+    return _softmax_np(class_scores)
+
+
+def _tabpfn_predict_small_proba(
+    *,
+    X_context: np.ndarray,
+    y_context: np.ndarray,
+    X_query: np.ndarray,
+    query_chunk_size: int,
+    device: str,
+    n_classes: int,
+) -> np.ndarray:
     torch_mod, _ = require_torch()
-    adapter = TabPFNPromptAdapter(device=device).build()
+    adapter = TabPFNPromptAdapter(device=device, random_state=30_421).build()
     context_x = torch_mod.tensor(X_context, dtype=torch_mod.float32, device=device)
     context_y = torch_mod.tensor(y_context, dtype=torch_mod.long, device=device)
     adapter.fit_prompt(context_x, context_y)
@@ -268,7 +361,24 @@ def _tabpfn_predict_proba(
     adapter.clear_prompt()
     if str(device).startswith("cuda") and torch_mod.cuda.is_available():
         torch_mod.cuda.empty_cache()
-    return np.concatenate(parts, axis=0)
+    proba = np.concatenate(parts, axis=0)
+    return _pad_proba(proba, n_classes)
+
+
+def _pad_proba(proba: np.ndarray, n_classes: int) -> np.ndarray:
+    if proba.shape[1] == n_classes:
+        return proba
+    if proba.shape[1] > n_classes:
+        return proba[:, :n_classes]
+    out = np.full((proba.shape[0], n_classes), 1e-15, dtype=np.float64)
+    out[:, : proba.shape[1]] = proba
+    return out / out.sum(axis=1, keepdims=True)
+
+
+def _softmax_np(logits: np.ndarray) -> np.ndarray:
+    shifted = logits - np.max(logits, axis=1, keepdims=True)
+    exp = np.exp(shifted)
+    return exp / exp.sum(axis=1, keepdims=True)
 
 
 def _classification_metrics(y_true: np.ndarray, proba: np.ndarray) -> dict[str, float]:

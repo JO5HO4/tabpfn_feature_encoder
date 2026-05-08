@@ -6,6 +6,24 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${REPO_ROOT}"
 
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+
+timestamp_utc() {
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+log() {
+    echo "[$(timestamp_utc)] $*"
+}
+
+prefix_stream() {
+    local name="$1"
+    local line
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        echo "[$(timestamp_utc)] [${name}] ${line}"
+    done
+}
+
 if [[ "$#" -gt 0 ]]; then
     configs=("$@")
 else
@@ -45,17 +63,17 @@ if [[ "${max_jobs}" -gt "${#configs[@]}" ]]; then
     max_jobs="${#configs[@]}"
 fi
 
-echo "Running full TabPFN feature-encoder workflow for ${#configs[@]} config(s)."
-echo "Each config trains the source encoder, then runs source, CP even/odd, and GamGam transfer evaluations."
+log "Running full TabPFN feature-encoder workflow for ${#configs[@]} config(s)."
+log "Each config trains the source encoder, then runs source, CP even/odd, and GamGam transfer evaluations."
 
 plot_comparison() {
     if [[ "${TABPFN_WORKFLOW_PLOT:-1}" == "0" ]]; then
         return
     fi
     echo
-    echo "================================================================"
-    echo "Plotting context-scan comparisons"
-    echo "================================================================"
+    log "================================================================"
+    log "Plotting context-scan comparisons"
+    log "================================================================"
     "${SCRIPT_DIR}/plot_context_comparison.sh"
 }
 
@@ -68,27 +86,32 @@ done
 
 if [[ "${max_jobs}" -le 1 ]]; then
     if [[ "${#gpu_ids[@]}" -gt 0 ]]; then
-        echo "Running sequentially on GPU ${gpu_ids[0]}."
+        log "Running sequentially on GPU ${gpu_ids[0]}."
     else
-        echo "Running sequentially. No GPU list was detected."
+        log "Running sequentially. No GPU list was detected."
     fi
 
-    for config in "${configs[@]}"; do
+    for idx in "${!configs[@]}"; do
+        config="${configs[$idx]}"
+        name="$(basename "${config}")"
+        name="${name%.*}"
         echo
-        echo "================================================================"
-        echo "Running workflow config: ${config}"
-        echo "================================================================"
+        log "================================================================"
+        log "Starting config $((idx + 1))/${#configs[@]}: ${name}"
+        log "Config path: ${config}"
+        log "================================================================"
         if [[ "${#gpu_ids[@]}" -gt 0 ]]; then
             CUDA_VISIBLE_DEVICES="${gpu_ids[0]}" "${SCRIPT_DIR}/run_source_encoder.sh" "${config}"
         else
             "${SCRIPT_DIR}/run_source_encoder.sh" "${config}"
         fi
+        log "Finished config $((idx + 1))/${#configs[@]}: ${name}"
     done
 
     echo
     plot_comparison
     echo
-    echo "Full workflow complete."
+    log "Full workflow complete."
     exit 0
 fi
 
@@ -96,8 +119,15 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log_dir="${TABPFN_WORKFLOW_LOG_DIR:-${REPO_ROOT}/runs/workflow_logs/${timestamp}}"
 mkdir -p "${log_dir}"
 
-echo "Running up to ${max_jobs} config(s) in parallel on GPUs: ${gpu_ids[*]}"
-echo "Workflow logs: ${log_dir}"
+stream_logs="${TABPFN_WORKFLOW_STREAM_LOGS:-1}"
+
+log "Running up to ${max_jobs} config(s) in parallel on GPUs: ${gpu_ids[*]}"
+log "Workflow logs: ${log_dir}"
+if [[ "${stream_logs}" == "0" ]]; then
+    log "Live log streaming is disabled by TABPFN_WORKFLOW_STREAM_LOGS=0."
+else
+    log "Streaming live logs with per-config prefixes. Full logs are still saved."
+fi
 
 pids=()
 names=()
@@ -108,10 +138,10 @@ wait_for_wave() {
     local idx
     for idx in "${!pids[@]}"; do
         if wait "${pids[$idx]}"; then
-            echo "Finished ${names[$idx]} successfully. Log: ${logs[$idx]}"
+            log "Finished ${names[$idx]} successfully. Log: ${logs[$idx]}"
         else
-            echo "FAILED ${names[$idx]}. Log: ${logs[$idx]}" >&2
-            echo "Last 80 log lines for ${names[$idx]}:" >&2
+            log "FAILED ${names[$idx]}. Log: ${logs[$idx]}" >&2
+            log "Last 80 log lines for ${names[$idx]}:" >&2
             tail -n 80 "${logs[$idx]}" >&2 || true
             failures=$((failures + 1))
         fi
@@ -130,14 +160,24 @@ for idx in "${!configs[@]}"; do
     log_path="${log_dir}/${name}.log"
 
     echo
-    echo "================================================================"
-    echo "Starting workflow config: ${config}"
-    echo "GPU: ${gpu_id}"
-    echo "Log: ${log_path}"
-    echo "================================================================"
+    log "================================================================"
+    log "Starting config $((idx + 1))/${#configs[@]}: ${name}"
+    log "Config path: ${config}"
+    log "GPU: ${gpu_id}"
+    log "Log: ${log_path}"
+    log "================================================================"
 
-    CUDA_VISIBLE_DEVICES="${gpu_id}" "${SCRIPT_DIR}/run_source_encoder.sh" "${config}" \
-        >"${log_path}" 2>&1 &
+    if [[ "${stream_logs}" == "0" ]]; then
+        CUDA_VISIBLE_DEVICES="${gpu_id}" "${SCRIPT_DIR}/run_source_encoder.sh" "${config}" \
+            >"${log_path}" 2>&1 &
+    else
+        (
+            set -o pipefail
+            CUDA_VISIBLE_DEVICES="${gpu_id}" "${SCRIPT_DIR}/run_source_encoder.sh" "${config}" 2>&1 \
+                | prefix_stream "${name}" \
+                | tee "${log_path}"
+        ) &
+    fi
     pids+=("$!")
     names+=("${name}")
     logs+=("${log_path}")
@@ -153,11 +193,11 @@ fi
 
 if [[ "${failures}" -gt 0 ]]; then
     echo
-    echo "Full workflow finished with ${failures} failed config(s)." >&2
+    log "Full workflow finished with ${failures} failed config(s)." >&2
     exit 1
 fi
 
 echo
 plot_comparison
 echo
-echo "Full workflow complete."
+log "Full workflow complete."

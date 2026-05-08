@@ -12,6 +12,7 @@ description: Use when running, configuring, validating, or documenting the tabpf
 - Particle GNN config: `configs/source_gnn.yaml`.
 - Particle transformer config: `configs/source_transformer.yaml`.
 - Full workflow launcher: `bash scripts/run_full_workflow.sh`.
+- Dispatcher spelling: `bash scripts/run full workflow`.
 - Launcher: `bash scripts/run_source_encoder.sh`.
 - Source transfer rerun: `bash scripts/run_source_transfer.sh`.
 - CP transfer rerun: `bash scripts/run_cp_transfer.sh`.
@@ -39,7 +40,8 @@ The runner falls back to `conda run --no-capture-output -n tabpfn` if the consol
 - Runs `configs/source_residual_mlp.yaml`, `configs/source_gnn.yaml`, and `configs/source_transformer.yaml` by default.
 - For each config, trains the 12-class source encoder and then runs source-task, CP even/odd, and open-data transfer evaluations.
 - Runs configs in parallel by default when multiple GPUs are visible, with one config per GPU.
-- Writes parallel logs to `runs/workflow_logs/<timestamp>/`.
+- Streams per-config logs to the terminal and writes full logs to `runs/workflow_logs/<timestamp>/`.
+- Set `TABPFN_WORKFLOW_STREAM_LOGS=0` to disable live log streaming.
 - Select GPUs with `TABPFN_WORKFLOW_GPUS=0,1,2,3 bash scripts/run_full_workflow.sh`.
 - Force sequential execution with `TABPFN_WORKFLOW_PARALLEL=0 bash scripts/run_full_workflow.sh`.
 - Runs context comparison plotting at the end unless `TABPFN_WORKFLOW_PLOT=0` is set.
@@ -65,6 +67,17 @@ The runner falls back to `conda run --no-capture-output -n tabpfn` if the consol
 - Keep model selection in `models/factory.py`.
 - Keep PyTorch import helpers in `models/torch_utils.py`.
 - Leave `models/encoders.py` as a compatibility re-export layer, not the place for new model logic.
+
+## Source Training Expectations
+
+- Training uses frozen TabPFN support/query episodes; only encoder weights are optimized.
+- For the 12-class source task, the trainer uses binary ECOC by default:
+  `encoder.tabpfn_max_classes: 2`, `encoder.many_class_redundancy: 4`.
+- Default source configs use `output_dim: 72`, `learning_rate: 0.0002`,
+  `grad_clip_norm: 1.0`, and `validation_episodes: 8`.
+- Validation is episodic and rotates through validation support/query contexts
+  using the same 50/50 support/query split as training.
+- Epoch logs should include `grad_norm_mean` and `grad_norm_max`.
 
 ## Validation Commands
 
